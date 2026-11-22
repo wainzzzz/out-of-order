@@ -1,0 +1,1217 @@
+<!DOCTYPE html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><title>電梯逃脫</title><!--
+╔══════════════════════════════════════════════════════════════════════════════╗
+║  電梯逃脫 / ELEVATOR ESCAPE ── 單檔 HTML（Three.js r128）  ·  設計交接版                ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+【檔案結構（由上到下）】
+  ① <style>            CSS：所有 UI 外觀（已換成復古暗黑風：雙層細框、掃描線、點陣網底；可放心改色、字體、材質、動畫）
+  ② <body> 的 HTML     UI 骨架：#scene 內含 3D canvas 與各種浮層（ID 不可改名，見下表）
+  ③ <script> 區塊 A     遊戲邏輯：道具資料 IT、對話系統、Log、劇情事件 ev*、互動處理器 H、機器 UI
+  ④ <script> 區塊 B     Three.js 場景：renderer/燈光/材質、電梯模型、可點擊物件、相機、主迴圈
+  搜尋提示：全檔用「【CONTRACT】」標記「改了會壞掉」的地方；用「【VISUAL】」標記「可自由換外觀」的地方。
+
+══════════ 一、UI 元素 ID / CLASS（JS 以 $('id') 直接抓取，改名＝壞掉）══════════
+  #g           最外層容器                                #top      遊戲主區（場景＋右欄）
+  #scene       3D 場景容器（canvas 被插入為其第一個子節點；所有浮層 absolute 疊在它上面）
+  #back        「返回上一個視角」列（zoom 狀態才顯示；JS 切 display）
+  #ctl         左下角 7 顆視角按鈕（button[data-c]= l/u/d/r/in/out/h；JS 讀 dataset.c）
+  #dlgp        底部對話框外框（JS 加/移除 class：on＝顯示、toast＝短提示小尺寸）
+    #who       說話者名稱（JS 設 class：m＝警衛室、p＝玩家、s＝系統，可改顏色）
+    #dlog      （已移除：對話紀錄只從右欄「對話紀錄」開啟）
+    #txt       對話文字區（打字機逐字填入；class n＝旁白斜體）
+    #ch        選項按鈕容器（JS 動態塞 <button data-i="0..">）
+    #nx        右下角閃爍 ▼（JS 只切 visibility）
+  #logw        LOG 視窗（class on＝顯示；開啟時擋住 3D 點擊）
+    #lh / #lx  標題列 / 關閉按鈕      #ll  捲動清單（每行 .le，附 m/p/s/c/n 類別；內含 .lt0 序號、<b> 說話者）
+  #modal #mb   「密碼機」彈窗（內容由 machine() 動態產生，見下方 #mc 系列）
+  #fl          閃光層（class on 觸發 fl 動畫）          #ov  黑幕/結局文字層（class on＝全黑）
+  #side        右側欄
+    #about     「持有物品」按鈕（說明文字）            #inv  道具格容器（render() 每次重建）
+      .slot    一格；.slot.full＝有道具（可點）；.slot.sel＝選中（呼吸光）；內含 <svg viewBox="0 0 32 32">
+               ★ 點擊判定靠 '.slot.full' 與 data-id（＝IT 的 key），不可移除這兩個
+    #selname   目前選取的道具名稱
+    #lk        「查看道具」按鈕（開 3D 檢視器）        #lg  「對話紀錄」按鈕
+  #vm #vb      道具 3D 檢視器（全螢幕彈窗）：#vt 名稱、#vc 放 canvas 的容器、#vdsc 描述、#vx 關閉
+  密碼機彈窗內部（machine() 產生）：#mc 外框、#ml 左欄、#dot 電源燈（class g＝亮）、#slot 刷卡槽、
+               #mr 右欄、#bx 四格輸入（.lt）、#rg 四個圖示環（.rg）、#rs 重設（如有）、#x 關閉
+  class .sk（畫面震動）、.btn（通用按鈕）可自由換樣式。
+
+══════════ 二、可互動 3D 物件（變數名 → 點擊處理器 H[...]）══════════
+  點擊流程：cvs.onpointerup → pick() 對 HOT 陣列做 raycast → 讀 mesh.userData
+    userData.h = 處理器名稱（H 物件的 key）   userData.g = 所屬 zoom 群組（ZM 的 key，沒有則直接互動）
+    userData.f = 「目前可否被點」的過濾函式（依狀態 S）    userData.d/p/fm/k/stuck = 該物件的附加資料
+  登記方式只有兩種：tag(mesh,{...}) 把「已存在的可見 mesh」變成可點；hit(w,h,d,x,y,z,{...}) 建「隱形判定盒」。
+  ★ 換模型時：新模型不需要可點 → 保留舊的 hit()/tag 對象即可；若要讓新模型本身可點 → 對它呼叫 tag(新mesh,{同樣的 userData})。
+
+  變數名      │ 是什麼                    │ h(handler) │ g(zoom) │ 可點條件 f / 備註
+  ───────────┼──────────────────────────┼────────────┼─────────┼──────────────────────────────
+  plate      │ 按鈕面板底板（tag）        │ plate      │ panel   │ 點了 → zoom 進面板（ZM.panel）
+  BT[] / btn │ 數字按鈕 0-9（tag，共10顆）│ btn        │ panel   │ userData.d＝數字；p＝按下動畫值；fm＝發光材質；stuckBtn＝卡死的那顆(0)
+  stuckBtn   │ 卡死按鈕（BT 其一）        │ btn        │ panel   │ 用「車門鑰匙」撬開→露出 hole+ball（S.pried）
+  hole / ball│ 按鈕後洞 / 皺紙球（ball tag）│ paper     │ panel   │ f: S.pried && !S.paper
+  disp / dp  │ 面板紅色小螢幕（tag）      │ scr        │ scr     │ drawDisp(text,on) 重畫螢幕貼圖
+  (mic hit)  │ 對講機隱形判定盒           │ mic        │ panel   │ 無 f
+  dL / dR    │ 電梯左右門板（tag）        │ door       │ —       │ 結局才有效：S.ent && !S.over 時 end()；門板位置由主迴圈依 S.exit 滑動
+  md         │ 維修暗門「鉸鏈群組」        │ —          │ —       │ 旋轉軸在 md；主迴圈依 S.open 轉 rotation.y
+  mdb        │ 維修暗門門板（tag）        │ mdoor      │ mdoor   │ f: !S.open；用 小鑰匙(dkey) 開 → evOpen
+  (mach hit) │ 密碼機隱形判定盒           │ mach       │ mdoor   │ f: S.open → machine() 開彈窗；machM 是顯示用貼圖面
+  nt         │ 暗門內的真紙條（模型）      │ note       │ mdoor   │ f: S.open && !S.real（判定盒另建）
+  post / pg  │ 海報（post tag；pg 是群組） │ poster     │ poster  │ f: !S.pdone；pc(k=1/2) 兩個隱形角落判定盒（左上/右上）撕角
+  rail / rr  │ 左/右扶手（railModel）     │ rail       │ —       │ 判定盒 f: !S.rail；撕下後進背包，用於逃生口
+  cpm→hatHit │ 天花板逃生口隱形判定盒      │ hatch      │ —       │ 無 f（開著點＝關上；關著＋選扶手＝撬開）
+  hatG       │ 逃生口金屬蓋板（群組）      │ —          │ —       │ 純視覺；位置由主迴圈依 hatP（0→1）算：先上抬再側滑
+  flapM      │ 地毯可掀翻角（頂點驅動）    │ flap       │ —       │ 判定盒 hit(...,{h:'flap'})；S.lift 切換；peel(p) 每幀重算頂點
+  key / (key hit)│ 地毯下小鑰匙           │ key        │ —       │ f: S.lift && !S.dkey && flapP>.8；key.visible 依 flapP>.55
+  card       │ 逃生口掉下的警衛證          │ card       │ —       │ f: S.drop && cardSt==2 && !S.card（cardSt：0待命/1掉落中/2落地）
+  ZM（zoom表）: panel→[plate,52] scr→[disp,24] poster→[post,44] mdoor→[mdb,30]
+               ★ ZM 以「變數名」指向 plate/disp/post/mdb 來決定 zoom 的鏡頭對準點與 fov；換這四個模型時要同步更新 ZM。
+
+══════════ 三、遊戲狀態 S（所有畫面都由 S 推導；新增動畫請讀 S，不要另存狀態）══════════
+  S.pow   密碼機通電（刷了警衛證）      S.open  維修暗門已開        S.mdone 密碼機已解（OPEN）
+  S.sol   面板已解鎖可輸入樓層          S.code  已輸入的樓層字串     S.ent   6碼輸入完成、可走向電梯門
+  S.over  結局演出中                    S.exit  門打開、角色走出     S.shk   震動演出中
+  S.pried 按鈕已撬開                    S.paper 已取走血紙條        S.fixed 按鈕已按回原位
+  S.scr   螢幕已看過                    S.rev   警衛室身分揭露      S.rail  扶手已撕下（主迴圈讓它飛離牆面）
+  S.hat   逃生口蓋板是否開著            S.hatOnce 證件已掉過一次    S.drop  證件已掉出   S.card 證件已拿
+  S.lift  地毯角掀起                    S.dkey  已拿小鑰匙          S.real  已拿真紙條
+  S.p1 / S.p2 海報左/右上角已撕起        S.pt    海報歪斜量          S.pdone 海報已撕下
+  另：busy（劇情演出鎖，true 時「物件互動 H」被忽略；但轉視角、點物件放大、返回、選道具、查看道具、Log 仍可用；演出中點空白處＝下一句）、sel（目前選取的道具 id）、inv（背包陣列）、Z（目前 zoom 群組，null＝自由視角）、
+      hist（Log 陣列）、logOpen（LOG 開啟時鎖 3D 點擊）、dMode（對話狀態 0 空閒/1 打字中/2 等點擊/3 選項）
+
+══════════ 四、對話 / 狀態機 API（劇情之後回來改這裡）══════════
+  say(說話者,文字) / M(文字)＝警衛室 / P(文字)＝玩家 / N(文字)＝旁白  → 回傳 Promise，玩家點擊後 resolve；自動寫入 hist
+  choose([選項...]) → Promise<索引>；note(文字,[標籤]) → 非阻塞短提示（自動消失、也進 Log）
+  give(id) 加道具；run(async fn) 包住一段「演出」（自動上鎖 busy、結束解鎖）；H.xxx 是「點到某物件時做什麼」
+  事件函式：evPry/evPaper/evScr/evHatch/evHatchClose/evCard/evKey/evOpen/evNote/evPoster/evSolved/machine()/end()
+  道具資料 IT = { id:[名稱, 描述, 圖示SVG內容] }；3D 檢視器模型表 MODEL = { id: 產生模型的函式 }（新增道具兩邊都要加）
+
+══════════ 五、改外觀時的鐵則 ══════════
+  1. 不要改名：上面表格的 ID、變數名、H 的 key、S 的 key、userData.h/g。
+  2. UI 想換皮：只動 CSS；若重寫 HTML，務必保留所有 id 與 .slot/.slot.full/.slot.sel、#dlgp.on/.toast、#logw.on。
+  3. 換 3D 模型：保持位置與判定盒大小大致相同；隱形判定盒（hit）與外觀無關，不會因換模型失效。
+  4. 3D 渲染：後處理(EffectComposer)失敗會自動退回直接 render；R.localClippingEnabled 用於門板裁切（dClip），別移除。
+  5. CDN：three@r128（cdnjs）＋examples（jsDelivr），需連網。
+  6. 音效：SFX 模組（Web Audio 合成）＋ sfxTick() 由主迴圈呼叫、比對 S 變化播放；#snd 為靜音鈕。
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=DotGothic16&family=Noto+Sans+TC:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+/* ╔═══ 【VISUAL】UI 換皮：復古暗黑獨立遊戲風（雙層細框＋掃描線＋點陣網底）。所有 id / class 名稱維持原樣 ═══╗ */
+:root{--amber:#e8dcc0;--red:#d9564a;--line:#5d605e;--line2:#c9cbc6;--txt:#ecebe6;--dim:#8f928f;
+ --font:"Noto Sans TC","PingFang TC","Microsoft JhengHei",sans-serif;--pix:"DotGothic16","Noto Sans TC",ui-monospace,monospace;
+ --dither:repeating-conic-gradient(#ffffff06 0 25%,#0000 0 50%) 0 0/4px 4px;
+ --scan:repeating-linear-gradient(0deg,#ffffff07 0 1px,#0000 1px 3px);
+ --frame:inset 0 0 0 1px #d4d6d1,inset 0 0 0 3px #050505,inset 0 0 0 4px #545755}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:#040404;color:var(--txt);font-family:var(--font);user-select:none;-webkit-tap-highlight-color:transparent}
+body{display:flex;justify-content:center;align-items:center;padding-top:env(safe-area-inset-top,0);background:radial-gradient(ellipse at 50% 35%,#141615,#040404 72%)}
+button{font-family:var(--font)}
+/* ===== 【CONTRACT】佈局骨架：#g 容器 / #top / #scene（3D 容器，勿改 position:relative） ===== */
+#g{width:min(100vw - 12px,900px)}
+#top{display:flex;overflow:hidden;background:#000;border-radius:2px;box-shadow:0 0 0 1px #000,0 0 0 2px #3c3f3d,0 0 0 5px #0a0b0b,0 0 0 6px #262827,0 18px 50px #000}
+#scene{position:relative;flex:1;overflow:hidden;aspect-ratio:4/3;background:#000}
+/* 3D 畫面上的暗角＋極淡掃描線 */
+#scene::after{content:"";position:absolute;inset:0;pointer-events:none;z-index:3;background:repeating-linear-gradient(0deg,#0000001c 0 1px,#0000 1px 3px),radial-gradient(ellipse at 50% 46%,#0000 52%,#000a 100%)}
+/* ===== 【VISUAL】右側欄 #side（參考圖十：直立網格道具槽＋做舊金屬框） ===== */
+#side{width:23%;min-width:112px;display:flex;flex-direction:column;gap:8px;padding:10px 9px;overflow:auto;
+ background:var(--dither),linear-gradient(180deg,#151716,#0b0c0c);box-shadow:inset 1px 0 0 #3f4240,inset 2px 0 0 #000,inset 3px 0 0 #2a2c2b,inset 0 0 30px #000}
+.sb{position:relative;border:0;border-radius:2px;padding:9px 4px;font-size:12.5px;letter-spacing:.18em;color:#d8d9d4;cursor:pointer;
+ background:var(--scan),linear-gradient(#2a2c2b,#141515);box-shadow:inset 0 0 0 1px #8d908b,inset 0 0 0 2px #000,inset 0 0 0 3px #3a3c3b,0 2px 4px #000a;transition:color .15s,box-shadow .15s}
+.sb:hover{color:#fff;box-shadow:inset 0 0 0 1px #e9eae5,inset 0 0 0 2px #000,inset 0 0 0 3px #5b5e5c,0 0 10px #ffffff22}
+.sb:active{transform:translateY(1px)}
+#about{cursor:help;color:#f1ede2;font-size:13px;letter-spacing:.42em;padding:7px 4px;background:var(--scan),linear-gradient(#1e201f,#0f1010);box-shadow:var(--frame)}
+#inv{display:grid;grid-template-columns:repeat(2,1fr);gap:6px;padding:6px;background:#0008;box-shadow:inset 0 0 0 1px #3a3d3b,inset 0 0 12px #000}
+/* ===== 【VISUAL+CONTRACT】道具格 .slot / .slot.full / .slot.sel；JS 依 .slot.full 與 data-id 判定點擊 ===== */
+.slot{position:relative;aspect-ratio:1;border-radius:1px;display:flex;align-items:center;justify-content:center;
+ background:var(--dither),linear-gradient(160deg,#2b2e2d,#161818 60%,#1d201f);
+ box-shadow:inset 0 0 0 1px #767a77,inset 0 0 0 2px #0a0b0b,inset 0 0 0 3px #3b3e3c,inset 0 0 10px #000c;opacity:.58}
+/* 四角鉚釘（做舊金屬框） */
+.slot::before,.slot::after{content:"";position:absolute;inset:4px;pointer-events:none;
+ background:radial-gradient(circle at 2px 2px,#a3a6a2 0 1.1px,#0000 1.7px),radial-gradient(circle at calc(100% - 2px) 2px,#a3a6a2 0 1.1px,#0000 1.7px)}
+.slot::after{background:radial-gradient(circle at 2px calc(100% - 2px),#a3a6a2 0 1.1px,#0000 1.7px),radial-gradient(circle at calc(100% - 2px) calc(100% - 2px),#a3a6a2 0 1.1px,#0000 1.7px)}
+.slot svg{width:84%;height:84%;stroke:#e8e2d4;fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;filter:drop-shadow(0 2px 2px #000c)}
+.slot svg image{image-rendering:auto}
+.slot.full{opacity:1;cursor:pointer;transition:box-shadow .15s,transform .15s}
+.slot.full:hover{transform:translateY(-1px);box-shadow:inset 0 0 0 1px #c9ccc7,inset 0 0 0 2px #0a0b0b,inset 0 0 0 3px #555856,inset 0 0 10px #000c}
+.slot.sel{animation:glow 1.9s ease-in-out infinite}
+@keyframes glow{0%,100%{box-shadow:inset 0 0 0 1px #f4f2ea,inset 0 0 0 2px #000,inset 0 0 0 3px #b9b6a8,inset 0 0 12px #ffffff1c,0 0 5px #ffffff33}
+ 50%{box-shadow:inset 0 0 0 1px #fff,inset 0 0 0 2px #000,inset 0 0 0 3px #e7e3d2,inset 0 0 18px #ffffff30,0 0 12px #ffffff66}}
+#selname{min-height:2.1em;display:flex;align-items:center;justify-content:center;text-align:center;font-size:12.5px;letter-spacing:.16em;color:#f1ede2;padding:4px;background:#0009;box-shadow:inset 0 0 0 1px #4a4d4b}
+#selname:empty::before{content:"— 未選取 —";color:#5f625f;letter-spacing:.2em;font-size:11px}
+#side .sbs{margin-top:auto;display:flex;flex-direction:column;gap:6px;padding:7px;background:#0007;box-shadow:inset 0 0 0 1px #3a3d3b}
+/* ===== 【CONTRACT】對話框 #dlgp（參考圖四）：JS 切 .on / .toast；#who #dlog #txt #ch #nx 皆為 JS 目標 ===== */
+#dlgp{position:absolute;left:12px;right:12px;bottom:48px;z-index:10;min-height:100px;padding:12px 22px 18px;border-radius:0;cursor:pointer;
+ background:rgba(3,3,3,.93);box-shadow:inset 0 0 0 1px #e4e5e1,inset 0 0 0 4px #030303,inset 0 0 0 5px #707370,0 0 0 1px #000,0 10px 30px #000d;
+ opacity:0;transform:translateY(8px);pointer-events:none;transition:opacity .18s,transform .18s}
+#dlgp::before{content:"";position:absolute;inset:5px;pointer-events:none;background:repeating-linear-gradient(0deg,#ffffff09 0 1px,#0000 1px 3px),radial-gradient(ellipse at 50% 0%,#ffffff08,#0000 70%)}
+#dlgp.on{opacity:1;transform:none;pointer-events:auto}
+#dlgp.toast{min-height:0;padding:9px 20px 11px}
+#dtop{position:relative;display:flex;justify-content:space-between;align-items:center;min-height:22px}
+#who{font-size:12.5px;letter-spacing:.24em;color:#ecebe6;padding:0 8px 0 0}
+#who:not(:empty){padding:1px 10px;margin-left:-6px;background:#000;box-shadow:inset 0 0 0 1px #8f928e}
+#who.m{color:#f08a7c}#who.p{color:#a9cdf0}#who.s{color:#e8dcc0}
+#dlog{border:0;border-radius:0;padding:2px 9px;font-family:var(--pix);font-size:10.5px;letter-spacing:.14em;color:#9a9d99;cursor:pointer;background:#000;box-shadow:inset 0 0 0 1px #4d504e}
+#dlog:hover{color:#fff;box-shadow:inset 0 0 0 1px #d4d6d1}
+#txt{position:relative;font-size:15.5px;line-height:1.8;min-height:1.8em;color:var(--txt);letter-spacing:.04em;text-shadow:0 0 3px #ffffff26,0 1px 0 #000}
+#txt.n{font-style:italic;color:#b5b8b4}
+#nx{position:absolute;right:18px;bottom:9px;color:#f1f0eb;font-size:12px;visibility:hidden;animation:blink 1.1s steps(2,end) infinite}
+@keyframes blink{0%,100%{opacity:.25}50%{opacity:1}}
+#ch{position:relative;display:flex;flex-direction:column;gap:7px;margin-top:6px}
+#ch button,.btn{border:0;border-radius:0;padding:8px 14px;font-size:14px;color:var(--txt);cursor:pointer;text-align:left;letter-spacing:.04em;
+ background:var(--scan),#0c0d0d;box-shadow:inset 0 0 0 1px #6c6f6c,0 0 0 1px #000}
+#ch button::before{content:"▸ ";color:#6f726f}
+#ch button:hover,.btn:hover{color:#fff;background:var(--scan),#1a1c1b;box-shadow:inset 0 0 0 1px #eceee9,0 0 10px #ffffff1c}
+#ch button:hover::before{color:#fff}
+/* ===== 【CONTRACT】LOG 視窗 #logw（.on 顯示）/ #lh #lx #ll / .le 每行 ===== */
+#logw{position:absolute;inset:8px;z-index:20;display:none;flex-direction:column;padding:14px 18px;background:var(--scan),rgba(4,5,5,.94);box-shadow:var(--frame),0 0 0 1px #000;cursor:default}
+#logw.on{display:flex}
+#lh{display:flex;justify-content:space-between;align-items:center;padding-bottom:9px;margin-bottom:6px;border-bottom:1px solid #4a4d4b;color:#f1ede2;letter-spacing:.3em;font-size:14px}
+#lx{border:0;border-radius:0;padding:5px 10px;font-size:12px;letter-spacing:.1em;color:#d0d2cd;cursor:pointer;background:#000;box-shadow:inset 0 0 0 1px #8d908b}#lx:hover{color:#fff;box-shadow:inset 0 0 0 1px #e9eae5}
+#ll{flex:1;overflow-y:auto;scrollbar-width:thin;scrollbar-color:#555856 transparent;padding-right:6px}
+.le{display:flex;gap:10px;align-items:baseline;padding:5px 0;font-size:13.5px;line-height:1.7;border-bottom:1px dashed #ffffff14;color:#d8d9d5}
+.le .lt0{flex:none;color:#6c6f6c;font-family:var(--pix);font-size:11px}.le b{flex:none;min-width:3.4em;font-weight:500;color:#a2a5a1}
+.le.m b{color:#f08a7c}.le.p b{color:#a9cdf0}.le.s b{color:#e8dcc0}.le.c b{color:#c4d6a0}.le.n span:last-child{color:#a9aca8;font-style:italic}
+/* ===== 密碼機彈窗 #modal #mb 與內部 #mc #ml #dot #slot #mr #bx .lt #rg .rg（machine() 產生，刻意保持淺色機器風） ===== */
+#modal{position:absolute;inset:0;background:#000c;display:none;align-items:center;justify-content:center;z-index:6}
+#mb{background:var(--scan),#0b0c0c;border-radius:0;padding:18px;width:88%;text-align:center;font-size:14px;position:relative;box-shadow:var(--frame),0 12px 30px #000}
+#x{position:absolute;right:10px;top:4px;cursor:pointer;color:#bfc1bc;font-size:18px;z-index:2}#x:hover{color:#fff}
+#mc{display:flex;background:#ebe9e2;border:3px solid #111;padding:10px;gap:8px;color:#111;box-shadow:inset 0 0 18px #0002}
+#ml{width:34px;border-right:3px solid #111;display:flex;flex-direction:column;align-items:center;padding:2px 4px 2px 0;gap:8px}
+#dot{width:12px;height:12px;border-radius:50%;background:#a9aca8;box-shadow:inset 0 1px 2px #0006}#dot.g{background:#5fd35a;box-shadow:0 0 6px #5fd35a}
+#slot{flex:1;width:7px;border:2px solid #111;background:#222;cursor:pointer;min-height:90px}
+#mr{flex:1;display:flex;flex-direction:column;align-items:center;gap:10px}
+#bx,#rg{display:flex;gap:8px;justify-content:center}
+.lt{width:42px;height:66px;border:3px solid #111;background:#d6d4cd;font-size:30px;text-align:center;color:#111;text-transform:uppercase;padding:0;font-family:inherit}
+.lt:not(:disabled){background:#fffbd0}
+.rg{width:42px;height:42px;border-radius:50%;border:6px solid #b3b3b3;display:flex;align-items:center;justify-content:center}.rg svg{width:22px;height:22px}
+/* ===== 全螢幕層：#ov 黑幕/結局文字、.sk 震動、#fl 閃光（JS 切 class） ===== */
+#ov{position:absolute;inset:0;background:#000;opacity:0;pointer-events:none;z-index:9;transition:opacity .8s;display:flex;align-items:center;justify-content:center;text-align:center;padding:20px;font-size:17px;line-height:1.9;flex-direction:column;gap:14px;color:#eee;letter-spacing:.04em}
+#ov.on{opacity:1;pointer-events:auto}
+.sk{animation:sk .5s 2}@keyframes sk{0%,100%{transform:none}20%{transform:translate(-6px,4px)}40%{transform:translate(6px,-5px)}60%{transform:translate(-4px,-3px)}80%{transform:translate(4px,3px)}}
+#fl{position:absolute;inset:0;background:#000;opacity:0;pointer-events:none;z-index:7}
+#fl.on{animation:fl 1.2s}@keyframes fl{0%,100%{opacity:0}18%{opacity:.65}38%{opacity:.05}60%{opacity:.55}85%{opacity:0}}
+/* ===== 【VISUAL】視角按鈕 #ctl；#back 返回列；JS 靠 data-c 判斷方向 ===== */
+#ctl{position:absolute;left:8px;bottom:8px;z-index:4;display:flex;gap:4px;padding:4px;background:#000b;box-shadow:inset 0 0 0 1px #4a4d4b}
+#ctl button{width:28px;height:28px;padding:0;border:0;border-radius:0;font-size:11px;color:#d8d9d4;cursor:pointer;background:var(--scan),linear-gradient(#262827,#121313);box-shadow:inset 0 0 0 1px #868985,inset 0 0 0 2px #000;transition:box-shadow .15s,color .15s}
+#ctl button:hover{color:#fff;box-shadow:inset 0 0 0 1px #f0f1ec,inset 0 0 0 2px #000,0 0 8px #ffffff33}
+#ctl button:active{transform:translateY(1px)}
+#back{display:none;position:absolute;left:0;right:0;bottom:0;height:34px;z-index:8;border:0;color:#d8d9d4;cursor:pointer;font-size:13px;letter-spacing:.24em;background:var(--scan),rgba(4,5,5,.92);box-shadow:inset 0 1px 0 #d4d6d1,inset 0 4px 0 #000,inset 0 5px 0 #4a4d4b}#back:hover{color:#fff}
+/* ===== 道具 3D 檢視器 #vm #vb（內含 #vt #vc #vdsc #vx）：參考圖十上方的展示框 ===== */
+#vm{position:fixed;inset:0;z-index:30;background:#000d;display:none;align-items:center;justify-content:center}
+#vb{background:var(--dither),linear-gradient(#141615,#0a0b0b);border-radius:0;padding:16px;width:min(92vw,360px);text-align:center;box-shadow:var(--frame),0 12px 36px #000}
+#vb #vt{font-size:15px;letter-spacing:.3em;color:#f1ede2!important;padding:5px 0;margin:0 0 8px!important;box-shadow:inset 0 -1px 0 #4a4d4b}
+#vb #vc{padding:4px;background:#0006;box-shadow:inset 0 0 0 1px #3a3d3b}
+#vb #vdsc{text-align:left;color:#dcddd8;padding:8px 10px;background:#000a;box-shadow:inset 0 0 0 1px #5a5d5b;font-style:italic}
+#vb #vx{text-align:center;min-width:110px}
+/* ===== 滿版模式：首頁與結局隱藏右側工具欄（#g.full），#top 固定比例避免畫面跳動 ===== */
+#top{aspect-ratio:1.73/1}#scene{aspect-ratio:auto;height:100%}#g.full #side{display:none}
+/* ===== 粗體標示（文件中的 **字**）===== */
+#txt b.hl{color:#ffe1a0;font-weight:700}#txt.sys b.hl{color:#d6f2ff}#txt.n b.hl{color:#e9dcc0}
+.le span b.hl{min-width:0;display:inline;font-weight:700;color:#ffe1a0}#sub span b.hl{display:inline;font-size:inherit;letter-spacing:0;font-weight:700;color:#ffe1a0}
+#ov .typ{white-space:pre-line}
+/* 密碼機彈窗：刷卡槽靠近字母格、圖案加大 */
+#mc{justify-content:center;gap:14px}#mr{flex:none}.rg{width:56px;height:56px}.rg svg{width:34px;height:34px}
+/* ===== 新增：系統文字（天藍色、不顯示說話者）／開場標題畫面／結局字幕與淡入文字 ===== */
+#txt.sys{color:#7fd3ff;font-style:normal;text-shadow:0 0 6px #3fa9ff55}
+#title{position:absolute;inset:0;z-index:12;display:none;flex-direction:column;align-items:center;justify-content:space-between;padding:12% 0 13%;background:radial-gradient(ellipse at 50% 55%,#0000 35%,#000c 100%)}
+#title.on{display:flex}
+#title .tt{font-family:var(--pix);font-size:clamp(34px,7.5vw,64px);letter-spacing:.2em;color:#ece8dc;text-shadow:0 0 6px #fff6,0 0 22px #9fd8ff55,0 3px 0 #000;animation:ttf 4.3s steps(1,end) infinite}
+#title .ts{margin-top:-30%;font-size:13px;letter-spacing:.6em;color:#9a9d99}
+#title .btn{min-width:180px;text-align:center;font-size:15px;letter-spacing:.4em;padding:11px 18px}
+@keyframes ttf{0%,100%{opacity:1}7%{opacity:.35}8%{opacity:1}46%{opacity:1}47%{opacity:.15}48%{opacity:.9}49%{opacity:.3}50%{opacity:1}}
+#sub{position:absolute;left:8%;right:8%;bottom:16%;z-index:8;text-align:center;font-size:16px;line-height:1.8;color:#ecebe6;text-shadow:0 1px 3px #000,0 0 10px #000;opacity:0;transition:opacity .6s;pointer-events:none}
+#sub.on{opacity:1}#sub.n span{font-style:italic;color:#c4c7c3}#sub b{display:block;font-size:12.5px;letter-spacing:.24em;font-weight:500}#sub b.m{color:#f08a7c}
+#ov .ovl{opacity:0;transition:opacity 1.5s}#ov .ovl.in{opacity:1}#ov .typ{min-height:1.9em;max-width:86%;margin:0 auto}
+/* ╔═══ 版面（參考圖一）：左上遊戲畫面＋右側工具欄，下方整條對話框（右上角「對話紀錄」）═══╗ */
+#g{position:relative;width:min(100vw - 12px,1000px);background:#000;border-radius:2px;box-shadow:0 0 0 1px #000,0 0 0 2px #3c3f3d,0 0 0 5px #0a0b0b,0 0 0 6px #262827,0 18px 50px #000}
+#top{box-shadow:none;border-radius:0}
+#side{padding:14px 12px;gap:10px}
+#about{width:78%;align-self:center}
+#side .sbs{flex-direction:row;gap:8px;padding:0;background:none;box-shadow:none}
+#side .sbs .sb{flex:1;font-size:12.5px;letter-spacing:.12em;padding:10px 2px}
+#dlgp{position:relative;left:auto;right:auto;bottom:auto;z-index:5;height:156px;min-height:0;margin:0;padding:12px 26px 16px;opacity:1;transform:none;pointer-events:auto;
+ background:var(--scan),#030303;box-shadow:inset 0 1px 0 #3c3f3d,inset 0 0 0 6px #000,inset 0 0 0 7px #e4e5e1,inset 0 0 0 10px #030303,inset 0 0 0 11px #707370}
+#dlgp::before{inset:11px}
+#dlgp.toast{min-height:0;padding:12px 26px 16px}
+#dtop{min-height:30px;margin-bottom:4px}
+#who{font-size:14px;letter-spacing:.2em}
+#lg{margin-left:auto;padding:6px 16px;font-size:13.5px;letter-spacing:.16em}
+#txt{font-size:16px;padding:0 22px}
+#nx{right:26px;bottom:16px;font-size:16px}
+#ch{flex-direction:row;flex-wrap:wrap;padding:0 22px}#ch button{flex:1 1 40%}
+#g.full #scene{position:absolute;inset:0;z-index:20}#g.full #side{display:none}
+#title{transition:opacity 1.5s}#title.fade{opacity:0}
+#sub.wait::after{content:"▼";display:block;font-size:12px;margin-top:6px;animation:blink 1.1s steps(2,end) infinite}
+/* ╔═══ 密碼機輸入畫面（參考圖二）：立體機箱、左側指示燈＋刷卡槽＋分隔線、四格字母、四個圖案環 ═══╗ */
+#modal{background:#000c}
+#mb{background:none;box-shadow:none;padding:36px 10px 10px 36px;width:auto}
+#x{right:-6px;top:-4px;color:#e6e6e2;font-size:24px}
+#mc{position:relative;z-index:0;display:flex;align-items:stretch;gap:0;width:min(540px,68vw);aspect-ratio:1.36;padding:6% 5% 7% 5%;background:#ebe8e0;border:4px solid #111;color:#111;box-shadow:inset 0 0 30px #0000000d}
+#mc::before{content:"";position:absolute;z-index:-1;left:-30px;top:-32px;right:-4px;bottom:-4px;background:#111;clip-path:polygon(0 0,calc(100% - 26px) 0,100% 28px,26px 28px,26px 100%,0 calc(100% - 28px))}
+#mc::after{content:"";position:absolute;z-index:-1;left:-26px;top:-28px;right:0;bottom:0;background:#5d5a52;clip-path:polygon(0 0,calc(100% - 23px) 0,100% 25px,22px 24px,22px 100%,0 calc(100% - 25px))}
+#ml{position:relative;width:15%;flex:none;display:flex;flex-direction:column;align-items:center;gap:9%;padding:4% 0;margin-right:9%;border:0;background:#e3e0d8}
+#ml::after{content:"";position:absolute;right:-28%;top:4%;bottom:0;width:5px;background:#111}
+#dot{width:46%;aspect-ratio:1;height:auto;border-radius:50%;background:radial-gradient(circle at 40% 35%,#c9ccc8,#8f928f);box-shadow:inset 0 0 0 1px #777}
+#dot.g{background:radial-gradient(circle at 40% 35%,#c4ffba,#3fbf3a);box-shadow:0 0 12px #5fd35a}
+#slot{flex:1;width:24%;min-height:0;border:2px solid #111;background:linear-gradient(90deg,#0a0a0a,#2e2e2e 60%,#0a0a0a);cursor:pointer}
+#mr{flex:1;display:flex;flex-direction:column;justify-content:center;align-items:stretch;gap:9%}
+#bx,#rg{display:flex;justify-content:space-between;gap:4%;padding:1.5%;background:#e6e3db}
+.lt{flex:1 1 0;min-width:0;width:0;height:auto;aspect-ratio:.64;box-sizing:border-box;border:5px solid #111;background:#d9d5cd;font-size:clamp(26px,4.5vw,46px);font-family:var(--pix)}
+.lt:not(:disabled){background:#fbf6dc}
+.rg{flex:1 1 0;min-width:0;width:0;height:auto;aspect-ratio:1;box-sizing:border-box;border:9px solid #b3b3b3;border-radius:50%;background:#ebe8e0}
+#mr{min-width:0}#bx,#rg{min-width:0}
+.rg svg{width:72%;height:72%}
+/* ===== 查看道具（橫式，置於遊戲畫面正中央）===== */
+#vm{position:absolute;inset:0;z-index:25;background:#000b;display:none;align-items:center;justify-content:center}
+#vb{display:flex;gap:20px;align-items:stretch;width:86%;max-width:760px;padding:18px;text-align:left}
+#vb #vc{flex:none;width:min(46%,320px);aspect-ratio:1;display:flex;align-items:center;justify-content:center;padding:6px}
+#vc canvas{width:100%!important;height:auto!important;max-width:100%}
+#vi{flex:1;min-width:0;display:flex;flex-direction:column;gap:12px}
+#vb #vt{text-align:left;margin:0!important;padding:4px 0 10px;font-size:17px}
+#vb #vdsc{flex:1;margin:0;font-size:14px;line-height:1.8}
+#vi .vh{font-size:11.5px;color:#7f827f;letter-spacing:.1em}
+#vb #vx{align-self:flex-end}
+/* ===== 對話框右上按鈕組（縮小）＋重新遊玩（深紅底淡紅字）；音效關閉狀態；首頁標題 ===== */
+#dbtn{position:absolute;top:16px;right:20px;z-index:2;display:flex;flex-direction:column;gap:6px;width:92px}
+#dbtn .sb{width:100%;padding:5px 4px;font-size:11.5px;letter-spacing:.12em}
+#rst{color:#ffb4ac;background:var(--scan),linear-gradient(#6a1414,#3e0909);box-shadow:inset 0 0 0 1px #c0605a,inset 0 0 0 2px #000,inset 0 0 0 3px #5a1a1a,0 2px 4px #000a}
+#rst:hover{color:#ffd9d4;box-shadow:inset 0 0 0 1px #f08a80,inset 0 0 0 2px #000,inset 0 0 0 3px #7a2222,0 0 10px #ff4a3a44}
+#txt,#ch{padding-right:112px}
+#snd.off{color:#6f726f;background:var(--scan),linear-gradient(#171818,#0c0d0d)}
+#title{justify-content:flex-start;padding:24% 0 13%}
+#title .tt{font-size:clamp(48px,10vw,88px)}
+#title .btn{margin-top:auto}
+/* 密碼機輸入成功回饋 */
+.lt.ok{background:#c6f1bb!important;border-color:#1f6b1a;color:#1f5a18;animation:ltok .3s ease-out 2}
+#mc.ok #dot{animation:dotok .25s steps(2,end) 4}
+@keyframes ltok{50%{transform:scale(1.08);box-shadow:0 0 14px #5fd35a}}
+@keyframes dotok{50%{opacity:.25}}
+</style></head><body><!-- ===== UI 骨架開始。以下每個 id 都被 JS 引用，請保留 ===== -->
+<div id="g">
+<div id="top"><div id="scene">
+<!-- [#back] zoom 返回列 -->
+<button id="back">▼ 返回上一個視角</button>
+<!-- [#ctl] 視角控制：data-c = l 左 / u 上 / d 下 / r 右 / in 拉近 / out 拉遠 / h 回正 -->
+<div id="ctl"><button data-c="l" title="向左看">◀</button><button data-c="u" title="向上看">▲</button><button data-c="d" title="向下看">▼</button><button data-c="r" title="向右看">▶</button><button data-c="in" title="拉近">＋</button><button data-c="out" title="拉遠">－</button><button data-c="h" title="回正">⌂</button></div>
+<div id="modal"><div id="mb"></div></div><div id="fl"></div><div id="ov"></div><div id="sub"></div>
+<!-- [#title] 開場標題畫面（OUT OF ORDER）；[#sub] 結局字幕 -->
+<div id="title"><div class="tt">OUT OF ORDER</div><button id="tgo" class="btn">開始遊戲</button></div>
+<!-- [#vm] 道具 3D 檢視器（遊戲畫面正中央、橫式）：#vc canvas 容器｜#vt 名稱｜#vdsc 描述｜#vx 關閉 -->
+<div id="vm"><div id="vb"><div id="vc"></div><div id="vi"><div id="vt"></div><p id="vdsc"></p><div class="vh">拖曳可從任意角度轉動物品</div><button class="btn" id="vx">關閉</button></div></div></div>
+<!-- [#logw] 對話紀錄視窗：#ll 為捲動清單，JS 依 hist 陣列重建 -->
+<div id="logw"><div id="lh"><span>對　話　紀　錄</span><button id="lx">關閉 ✕　ESC</button></div><div id="ll"></div></div>
+</div>
+<!-- [#side] 右欄：#about 說明｜#inv 道具格(JS 渲染 .slot)｜#selname 選中名稱｜#lk 查看道具｜#snd 音效 -->
+<div id="side"><button id="about" class="sb">持有物品</button><div id="inv"></div><div id="selname"></div><div class="sbs"><button id="lk" class="sb">查看道具</button><button id="snd" class="sb">音效：開</button></div></div></div>
+<!-- [#dlgp] 對話框（遊戲畫面下方整條）：#who 說話者｜#lg 對話紀錄｜#txt 打字機文字｜#ch 選項｜#nx 閃爍▼ -->
+<div id="dlgp"><div id="dtop"><span id="who"></span></div><div id="dbtn"><button id="lg" class="sb">對話紀錄</button><button id="rst" class="sb">重新遊玩</button></div><div id="txt"></div><div id="ch"></div><span id="nx">▼</span></div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script><script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/shaders/CopyShader.js"></script><script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/shaders/LuminosityHighPassShader.js"></script><script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/shaders/GammaCorrectionShader.js"></script><script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/EffectComposer.js"></script><script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/RenderPass.js"></script><script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/ShaderPass.js"></script><script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/UnrealBloomPass.js"></script>
+<script>
+const $=i=>document.getElementById(i);
+// ╔═══ 區塊 A：遊戲邏輯 ═══╗
+// 【CONTRACT】IT：道具資料表 { id:[名稱,描述,背包小圖示SVG內容] }。id 與 MODEL（3D 檢視器模型）、H/ev* 內的 give('id')/sel=='id' 對應。
+// 想換背包圖示 → 只改第三欄 SVG（viewBox 0 0 32 32，描邊風格由 CSS .slot svg 控制）。
+const IT={
+key:['車門鑰匙','你的車門鑰匙。金屬齒口很薄。','<path d="M14 19v11" stroke="#c9ccd0" stroke-width="2.6"/><path d="M8 7c4-2 8-2 12 0l1 9c0 3-3 4-7 4s-7-1-7-4z" fill="#1d1e21" stroke="#555"/><rect x="11" y="10" width="3" height="3" fill="#333" stroke="none"/><circle cx="17.5" cy="12.5" r="1.6" fill="#d6332b" stroke="none"/><circle cx="14" cy="4" r="3" stroke="#9a9ea2"/><path d="M17 4c3-1 6 0 7 3l-3 4c-2 0-4-2-4-4z" fill="#5a3322" stroke="#2a160d"/><path d="M11 3l-5 3 1 1" stroke="#b89a4c"/>'],
+fake:['染血的紙條','一張沾著血跡的紙條，寫著一串數字。','<path d="M4 9l9-2 6 2 9-1-1 15-8 1-6-2-8 2z" fill="#ecebe6" stroke="#8d8b85"/><path d="M4 9l5-1 1 4 2-3 1 6 1-4 2 5 0-6" fill="none" stroke="#a5121a" stroke-width="1.4"/><path d="M9 17h10M9 20h6" stroke="#333"/>'],
+real:['紙條','一張折過的紙條，寫著一串數字。','<path d="M5 9h22v14H5z" fill="#efe8d4" stroke="#8d8676"/><path d="M16 9v14" stroke="#c9bfa6"/><path d="M8 15h6M18 15h6M8 18h4" stroke="#2a2a55"/>'],
+rail:['電梯扶手','脱落下來的扶手，不鏽鋼製，挺硬的。','<path d="M4 24L28 8" stroke="#d6dadc" stroke-width="3.4"/><path d="M4 24L28 8" stroke="#ffffff" stroke-width="1"/><path d="M7 22l2 4M24 10l2 4" stroke="#8d9296" stroke-width="2.2"/>'],
+card:['警衛證','沾血的警衛證，照片是一位中老年男性。','<rect x="4" y="8" width="24" height="17" rx="1.5" fill="#e9ecef" stroke="#9aa"/><rect x="4" y="8" width="24" height="4" fill="#1d3466" stroke="none"/><rect x="7" y="14" width="6" height="8" fill="#b8bec4" stroke="none"/><path d="M16 16h9M16 19h7" stroke="#333"/><circle cx="23" cy="22" r="2" fill="#a0141b" stroke="none"/><rect x="13" y="4" width="6" height="4" fill="#c7cbcf" stroke="#777"/>'],
+dkey:['小鑰匙','一把黃銅小鑰匙。','<path d="M20 9h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-7z" fill="#c9a24f" stroke="#6d5420"/><ellipse cx="25.5" cy="16" rx="1.6" ry="4.4" fill="#141414" stroke="none"/><path d="M3 14h17v4H3z" fill="#d4b062" stroke="#6d5420"/><path d="M5 14l1-2 2 2 1-2 2 2 1-2 2 2" stroke="#6d5420"/>'],
+poster:['海報','從牆上撕下來的海報。','<path d="M8 3h16v26H8z" fill="#f2c227" stroke="#7a5c10"/><circle cx="16" cy="11" r="5.5" stroke="#d81e22" stroke-width="1.8"/><path d="M12 7l8 8" stroke="#d81e22" stroke-width="1.8"/><path d="M10 20h12" stroke="#d81e22" stroke-width="2.2"/><path d="M10 23h12M10 25h9" stroke="#333" stroke-width=".8"/><rect x="8" y="26" width="16" height="3" fill="#1c3f8f" stroke="none"/>']};
+// 【CONTRACT】全域狀態：busy 演出鎖｜S 劇情旗標（見檔頭第三節）｜inv 背包 id 陣列｜sel 選取中的道具 id
+let busy,S,inv,sel;
+const wait=ms=>new Promise(r=>setTimeout(r,ms));
+// 【CONTRACT】對話系統：hist(Log 紀錄)、dMode(0空閒/1打字/2等點擊/3選項)、say/note/choose/adv/hide、openLog/closeLog。
+// 【VISUAL】打字速度＝say() 內 setInterval 的 26ms；toast 持續＝note() 內的 3200ms。
+const hist=[];let logOpen=false,dMode=0,dRes=null,dTimer=0,dFull='',toastT=0;
+const esc=t=>String(t).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+// rich(t,n)：把 **粗體** 標示轉成 <b class="hl">，n＝只顯示前 n 個字（打字機用）
+function rich(t,n){let o='',b=false,c=0;n=n==null?1e9:n;for(let i=0;i<t.length&&c<n;i++){if(t[i]=='*'&&t[i+1]=='*'){o+=b?'</b>':'<b class="hl">';b=!b;i++;continue}o+=esc(t[i]);c++}return o+(b?'</b>':'')}
+const plain=t=>String(t).replace(/\*\*/g,'');
+function showP(on){$('dlgp').classList.toggle('on',!!on);if(!on)$('dlgp').classList.remove('toast')}
+function fin(){clearInterval(dTimer);dTimer=0;$('txt').innerHTML=rich(dFull);dMode=2;$('nx').style.visibility='visible'}
+function adv(){if(logOpen)return;if(dMode==1)fin();else if(dMode==2){dMode=0;showP(0);$('nx').style.visibility='hidden';$('txt').textContent='';$('who').textContent='';const r=dRes;dRes=null;if(r)r()}else if(dMode==0)showP(0)}
+function hide(){clearInterval(dTimer);clearTimeout(toastT);dMode=0;dRes=null;showP(0);$('ch').innerHTML='';$('txt').textContent='';$('who').textContent='';$('nx').style.visibility='hidden'}
+function cls(w){return w=='警衛室'?'m':(w=='你'||w=='玩家')?'p':w=='系統'?'s':''}
+// LOG 只記錄角色對話（警衛室／你），旁白、系統、提示一律不記
+const isChar=w=>w=='警衛室'||w=='你'||w=='玩家';
+function note(t,w){clearTimeout(toastT);if(!t){if(dMode==0)hide();return}
+ if(isChar(w))hist.push({w,t,c:cls(w)});
+ if(dMode)return;
+ $('who').textContent=isChar(w)?w:'';$('who').className=cls(w);$('txt').className=isChar(w)?'':'n';$('txt').innerHTML=rich(t);$('ch').innerHTML='';$('nx').style.visibility='hidden';
+ $('dlgp').classList.add('toast','on');toastT=setTimeout(()=>{if(dMode==0)hide()},3200)}
+function say(w,t){return new Promise(r=>{clearTimeout(toastT);clearInterval(dTimer);const n=!w||w=='旁白';dMode=1;dRes=r;dFull=t;
+ if(isChar(w))hist.push({w,t,c:cls(w)});const sy=w=='系統';
+ $('who').textContent=(n||sy)?'':w;$('who').className=cls(w);$('txt').className=n?'n':sy?'sys':'';$('txt').textContent='';$('ch').innerHTML='';$('nx').style.visibility='hidden';
+ $('dlgp').classList.remove('toast');showP(1);let i=0;const L=plain(t).length;dTimer=setInterval(()=>{i++;$('txt').innerHTML=rich(t,i);if(i>=L)fin()},26)})}
+const M=t=>say('警衛室',t),P=t=>say('你',t),N=t=>say('旁白',t);
+function choose(o){return new Promise(r=>{clearTimeout(toastT);clearInterval(dTimer);dMode=3;const c=$('ch');$('who').textContent='';$('txt').textContent='';$('nx').style.visibility='hidden';$('dlgp').classList.remove('toast');showP(1);
+ c.innerHTML=o.map((t,i)=>`<button data-i="${i}">${t}</button>`).join('');
+ c.onclick=async e=>{const i=e.target.dataset.i;if(i==null)return;c.innerHTML='';c.onclick=null;dMode=0;await P(o[i]);r(+i)}})}
+function openLog(){if(logOpen)return;logOpen=true;$('ll').innerHTML=hist.length?hist.map((e,i)=>`<div class="le ${e.c}"><span class="lt0">${String(i+1).padStart(3,'0')}</span><b>${esc(e.w)}</b><span>${rich(e.t)}</span></div>`).join(''):'<div class="le n"><span>（尚無對話紀錄）</span></div>';$('logw').classList.add('on');$('ll').scrollTop=$('ll').scrollHeight}
+function closeLog(){if(!logOpen)return;logOpen=false;$('logw').classList.remove('on')}
+$('lg').onclick=openLog;$('lx').onclick=closeLog;
+// 重新遊玩：點一次變「確定重來？」，2.5 秒內再點一次才真的重開（避免誤觸）
+$('rst').onclick=e=>{e.stopPropagation();const b=$('rst');if(TITLE||(S&&S.over))return;if(!b.dataset.ok){b.dataset.ok=1;b.textContent='確定重來？';clearTimeout(b._t);b._t=setTimeout(()=>{delete b.dataset.ok;b.textContent='重新遊玩'},2500);return}delete b.dataset.ok;b.textContent='重新遊玩';start(true)};
+$('logw').onclick=e=>{if(e.target==$('logw'))closeLog()};
+$('dlgp').onclick=e=>{if(e.target.closest('button'))return;adv()};
+$('ov').onclick=()=>adv();
+addEventListener('keydown',e=>{if(e.key=='Escape')closeLog();else if((e.key==' '||e.key=='Enter')&&!logOpen&&(dMode==1||dMode==2)&&e.target.tagName!='INPUT'){e.preventDefault();adv()}});
+// 【CONTRACT】背包渲染：重建 #inv 內的 .slot（至少 8 格、偶數）。圖示＝icon(id)：優先用 3D 模型即時拍的縮圖（thumb()，見區塊 B），失敗才退回 IT 第三欄 SVG。改格子外觀請改 CSS 或此處模板，但需保留 class "slot full sel" 與 data-id。
+function render(){const n=Math.max(8,inv.length+inv.length%2);let h='';for(let i=0;i<n;i++){const id=inv[i];h+=id?`<div class="slot full ${sel==id?'sel':''}" data-id="${id}" title="${IT[id][0]}"><svg viewBox="0 0 32 32">${icon(id)}</svg></div>`:'<div class="slot"></div>'}$('inv').innerHTML=h;$('selname').textContent=sel?IT[sel][0]:''}
+function icon(id){let u='';try{u=thumb(id)}catch(e){}return u?`<image href="${u}" x="0" y="0" width="32" height="32"/>`:IT[id][2]}
+// give(id)：加入背包並跳「獲得道具」系統訊息
+async function give(id){inv.push(id);render();await say('系統','獲得道具：'+IT[id][0])}
+$('inv').onclick=e=>{const d=e.target.closest('.slot.full');if(!d||logOpen)return;const id=d.dataset.id;sel=sel==id?null:id;render()};
+$('about').onclick=()=>{if(!busy&&!logOpen)note(sel?IT[sel][1]:'點一下道具即可選取，再點畫面中的地方就能使用。『查看道具』可以把選取的道具拿起來轉動檢查。','持有物品')};
+$('lk').onclick=()=>{if(logOpen)return;if(!sel)return note('先在道具欄點選一個道具。');viewItem(sel)};
+// 【CONTRACT】run(async fn)：演出包裝器。期間 busy=true → 3D/背包點擊被忽略；結束自動解鎖。劇情新增事件請都用它包。
+function run(f){if(busy)return;busy=true;f().catch(console.error).finally(()=>{busy=false;render()})}
+const fx=(c,e)=>{const x=$(e||'scene');x.classList.remove(c);void x.offsetWidth;x.classList.add(c)};
+function closeM(){$('modal').style.display='none'}
+function openM(h){$('mb').innerHTML='<span id="x">✕</span>'+h;$('modal').style.display='flex';$('x').onclick=closeM}
+// ── 演出用全域：GID 局號（重開時讓排程失效）｜TITLE 首頁中｜codeLock 錯碼閃爍中｜camera FX 變數見區塊 B 的 camFx() ──
+let GID=0,TITLE=false,codeLock=0;
+// 開場標題畫面 showTitle()：電梯門特寫＋閃爍燈光＋偶爾輕晃；按「開始遊戲」→ start()。結局的「回到首頁」也呼叫它。
+function showTitle(){GID++;busy=true;S={};inv=[];sel=null;hist.length=0;hide();closeLog();closeM();resetView();resetFx();render();
+ const o=$('ov');o.style.transition='opacity .8s';o.style.background='';o.style.color='';o.className='';o.innerHTML='';
+ $('ctl').style.display='none';$('g').classList.add('full');TITLE=true;yaw=tY=.09;pit=tP=-.13;fov=tF=36;$('title').classList.add('on')}
+$('tgo').onclick=()=>{SFX.unlock();if(TITLE)start()};
+function lookAround(g){(async()=>{await panTo(norm(.6),tP,tF,1900);if(g!=GID)return;await panTo(norm(-.6),tP,tF,2800);if(g!=GID)return;await panTo(norm(0),tP,tF,1900)})()}
+// 開場演出 start()：A-01 ～ A-09。A-06 起解除演出鎖，玩家可邊聽邊探索（若玩家觸發其他事件，開場尾段會被取代）。
+async function start(fade){
+ const g=++GID,o=$('ov');
+ if(TITLE||fade){o.style.transition='opacity 1.5s';o.style.background='';o.style.color='';o.innerHTML='';o.className='on';$('title').classList.add('fade');await wait(1500);if(g!=GID)return}   // 畫面慢慢變暗
+ TITLE=false;$('title').classList.remove('on','fade');$('g').classList.remove('full');
+ busy=true;S={};inv=['key'];sel=null;hist.length=0;codeLock=0;hide();closeLog();resetView();resetFx();closeM();render();
+ o.style.transition='';o.style.background='';o.style.color='';o.className='on';o.innerHTML='';
+ SFX.play('crash');
+ const a1=N('你睜開眼睛，伴隨一聲沉重的墜落巨響，嚇了一跳。');
+ shake(2800,.012);await wait(1000);if(g!=GID)return;                                  // 畫面慢慢震動
+ o.style.transition='opacity 1.5s';o.className='';flicker(3000);swayA=.05;await wait(3000);if(g!=GID)return;swayA=0;   // 黑幕淡出＋燈光不規律閃爍 3 秒
+ await a1;if(g!=GID)return;
+ const a2=N('燈光閃爍了一下，暫時恢復正常照明。恍惚之中，你似乎並不記得爲何會來到這裏。');
+ setTimeout(()=>{if(g==GID)lookAround(g)},1000);await a2;                             // 1 秒後鏡頭慢慢左右看
+ await N('**對講機**中傳出滋滋的雜音與說話聲……');
+ await M('你好，請問你是被困在電梯裡了嗎？喂，聽得到嗎，有沒有受傷？');
+ await choose(['我有聽到，你說。','三小……現在是怎樣？！']);if(g!=GID)return;
+ busy=false;render();   // 之後開放玩家自由探索互動點
+ await M('你不記得了嗎？你剛按緊急按鈕找了**警衛室**求助，我是來幫你的。');
+ await M('但是我這邊監視器壞了，沒辦法看到你的狀況。');
+ await M('你有試過**按其他樓層的按鈕**嗎？');
+ await P('還沒有，我試一試。');
+ if(dMode==0)hide()}
+// 延後排程：等演出鎖與對話都空了才跑（C-12 之後 5 秒自動進 C-13）
+function later(f,ms){const g=GID;setTimeout(function tryRun(){if(g!=GID||(S&&S.over))return;if(busy||dMode||logOpen)return setTimeout(tryRun,400);run(f)},ms)}
+// ── 劇情事件 ev*：每個對應一個 H 處理器，修改劇情文字/順序在這裡改 ──
+async function evPry(){S.pried=1;await N('你把車門鑰匙插進縫隙，用力一撬。按鈕彈了開來。')}
+async function evPaper(){S.paper=1;
+ await N('按鈕後面塞著一個**小紙團**。');await give('fake');
+ await P('（這是什麼……有點詭異啊。算了，先把按鈕裝回去再試試看吧。）');
+ S.fixed=1;
+ await N('你把按鈕裝回去後，電梯似乎重新開始運行了。');
+ exitZoom();tY=norm(0);tP=0;tF=65;
+ shake(2000,.006);SFX.play('rumble',.6);await wait(2000);          // 輕微震動 2 秒
+ S.shk=1;fx('on','fl');swayA=.03;                                  // 劇烈震動＋燈光狂閃約 3 秒
+ lookSlow(rail,50,1900);await wait(1300);S.rail=1;                 // 鏡頭慢慢搖晃著往下看向左側扶手，扶手同時脫落
+ await wait(1700);S.shk=0;swayA=0;
+ await panTo(norm(0),0,65,2000);await wait(300);                   // 緩慢回正、回到視平線
+ await N('電梯再次失控猛烈震動，燈光狂閃。你重心不穩，伸手去扶電梯壁的扶手——扶手早已老舊損壞，直接脱落。');
+ await M('發生什麽了？你那邊聽起來不太妙啊。');
+ await choose(['嘖……這裏怎麽全部東西都是壞的。','……這電梯好破……爛爆了我的生活。']);
+ await M('（輕笑）啊哈哈哈抱歉啦～你也懂的，至少你的房租很便宜不是嗎？')}
+// B-10、B-11：玩家點地上的扶手才撿起
+async function evRail(){S.rail2=1;await give('rail');await M('既然如此就先不要亂碰操控面板了，那你能看看你現在在**哪一層**嗎？')}
+// 鏡頭緩動：panTo(yaw,pitch,fov,ms)、lookSlow(物件,fov,ms)
+function panTo(y,p,f,ms){return new Promise(r=>{const a=[tY,tP,tF],t0=performance.now();(function st(){const k=Math.min(1,(performance.now()-t0)/ms),e=k*k*(3-2*k);tY=a[0]+(y-a[0])*e;tP=a[1]+(p-a[1])*e;tF=a[2]+(f-a[2])*e;if(k<1)requestAnimationFrame(st);else r()})()})}
+function lookSlow(o,f,ms){const sv=[tY,tP,tF];look(o,f);const tg=[tY,tP,tF];tY=sv[0];tP=sv[1];tF=sv[2];return panTo(tg[0],tg[1],tg[2],ms)}
+async function evScr(){S.scr=1;
+ await N('螢幕毫無訊號，一片漆黑。');
+ await P('不知道，螢幕看起來好像也故障了。');
+ await M('那**天花板**的燈有在亮嗎，室内有沒有異味？');
+ await M('算了，你待會再告訴我吧，我現在去找人幫忙，你等我一下。');
+ await P('（這個人真的靠譜嗎？希望他真的能找到人救我……）')}
+async function evHatch(){await N('你把電梯扶手抵住天花板中央的方形蓋板，用力往上一頂。');S.hat=1;await wait(1000);
+ if(!S.hatOnce){S.hatOnce=1;await wait(1000);S.drop=1;await N('蓋板被推到了一旁。**什麽東西**從上面掉了下來。')}else await N('蓋板被推開了。')}
+async function evHatchClose(){await N('你把蓋板重新蓋上。');S.hat=0;await wait(1600);note('蓋板重新蓋上了。')}
+async function evCard(){S.card=1;await give('card')}
+async function evCardThink(){if(S.cardSeen)return;S.cardSeen=1;
+ await P('這是那個人的警衛證？');
+ await P('（證件照上是個**老人**，可剛剛對講機裏的聲音分明還很**年輕**......）');
+ await P('（從一開始就覺得奇怪，原來那個人根本**不是警衛**，而且我完全沒有來到這裏的記憶……）');
+ later(evCall,7000)}
+let cardPend=false;
+function onView(id){document.body.classList.add('viewing');if(id=='card'&&S&&S.card&&!S.cardSeen)cardPend=true}
+function onViewClose(){document.body.classList.remove('viewing');if(cardPend){cardPend=false;later(evCardThink,500)}}
+async function evCall(){
+ await M('咳咳，喂，我回來囉～你檢查得怎麼樣了？');
+ await P('……');
+ await M('怎麼不說話，Hello？');
+ await M('（雀躍）我有一個好消息和一個壞消息，你想先聽哪個？');
+ await P('你真的有去找人幫忙嗎？');
+ await P('你到底是誰，我到底在哪裡？');
+ await M('我？我當然是來幫你的啊！');
+ await P('別再兜圈子了，我已經知道你不是這裡的警衛了，這一切到底是怎麼回事？');
+ await M('（吹了聲口哨）嗯……這是個複雜的問題。');
+ await M('但現在確實只有我才能幫你了吧？哈哈，別擔心，我是不會害你的。');
+ await choose(['……你知道你這樣我很難相信你的對吧。','……']);
+ await M('欸……你怎麽能懷疑我，我明明一直都在幫你，你太讓人寒心了！');
+ await M('其實我剛問到了解決辦法，維修工現在沒辦法進去，你得自己打開**維修暗門**然後修好它，然後輸入**六位數保險密碼**，接著應該就能出去嘍。');
+ await M('（輕笑）那麼你要相信我嗎？');
+ await P('……');S.rev=1}
+async function evKey(){S.dkey=1;await N('你拾起了地毯下的**小鑰匙**。');await give('dkey')}
+async function evOpen(){S.open=1;await N('鑰匙轉動，維修暗門「喀」的一聲彈開。')}
+async function evNote(){S.real=1;await N('暗門裏掉出了一個紙條，你疑惑地拾起了紙條。');await give('real');await P('（又是一張寫有六個數字的字條，爲什麽？）')}
+async function evPoster(){S.pdone=1;await wait(900);await N('海報被你整個取了下來。');await give('poster')}
+async function evSolved(){S.sol=1;drawDisp('12',1);
+ await N('密碼機發出一聲輕響，電梯的樓層螢幕閃了一下，恢復了運作。');
+ await M('看吧！我就說跟著我走準沒錯。電梯裡應該有個六位數字吧，跟著按樓層按鈕應該就行了，快去吧！');
+ await P('但是我找到了兩個六位數字。');
+ await M('喔，居然有兩個嗎？那我就不清楚了。');
+ await M('行了，快輸入密碼，趕緊結束這場無聊的遊戲。');
+ await P('……')}
+// 輸入正確的六位數（364712 或 786913）→ E-07、E-08 → 退出面板放大 → 到站音效＋輕震 2 秒 → 門自動打開進結局
+async function evEnter(){await say('系統','輸入成功');await N('面板閃了一下。你深吸一口氣，轉身面向電梯門。');
+ S.ent=1;exitZoom();tY=norm(0);tP=0;tF=65;await wait(800);SFX.play('ding');shake(2000,.005);await wait(2000);await end()}
+// 【CONTRACT】密碼機彈窗：動態產生 #mc/#ml/#dot/#slot/#bx/.lt/#rg；解答 OPEN；通電需選取「警衛證」(card) 點 #slot。
+function machine(){
+ const ic=['<rect x="2" y="7" width="20" height="10" fill="#ff69b4"/>','<polygon points="12,1 15,8 22,6 18,12 22,18 14,16 12,23 9,16 2,18 6,12 2,6 9,8" fill="#d2691e"/>','<path d="M12 21C3 14 2 9 6 6c3-2 6 0 6 3 0-3 3-5 6-3 4 3 3 8-6 15z" fill="#8f55ff"/>','<polygon points="2,9 14,9 14,4 22,12 14,20 14,15 2,15" fill="#bfff6b"/>'];
+ openM(`<div id="mc"><div id="ml"><i id="dot" class="${S.pow?'g':''}"></i><b id="slot"></b></div><div id="mr"><div id="bx">${[0,1,2,3].map(()=>`<input class="lt" maxlength="1" autocomplete="off" ${S.pow?'':'disabled'}>`).join('')}</div><div id="rg">${ic.map(s=>`<div class="rg">${S.pow?`<svg viewBox="0 0 24 24">${s}</svg>`:''}</div>`).join('')}</div></div></div>`);
+ $('slot').onclick=()=>{if(S.pow)return;if(sel=='card'){S.pow=1;note('警衛證滑過卡槽，指示燈亮了。');drawMach();machine()}else note('卡槽。')};
+ const L=[...document.querySelectorAll('.lt')];
+ L.forEach((el,i)=>{el.oninput=()=>{el.value=el.value.replace(/[^a-zA-Z]/g,'').toUpperCase().slice(-1);if(el.value&&L[i+1])L[i+1].focus();const s=L.map(x=>x.value).join('');
+  if(s.length==4){if(s=='OPEN'){L.forEach(x=>{x.disabled=true;x.classList.add('ok')});$('mc').classList.add('ok');S.mdone=1;drawMach();SFX.play('granted');   // 輸入成功的回饋，約 1 秒後才 zoom out＋關門
+   const g=GID;setTimeout(()=>{if(g!=GID)return;closeM();exitZoom();S.mclosed=1;later(evSolved,0)},1100)}else{note('密碼機發出短促的錯誤聲。');setTimeout(()=>{L.forEach(x=>x.value='');L[0].focus()},500)}}};
+  el.onkeydown=e=>{if(e.key=='Backspace'&&!el.value&&L[i-1]){L[i-1].focus();L[i-1].value=''}}});
+ if(S.pow&&L[0])L[0].focus()}
+// 結局：字幕 sub()（不需點擊，自動淡出）、打字機 typeInto()
+function sub(t,w,ms){const e=$('sub');if(w&&w!='旁白')hist.push({w,t,c:cls(w)});e.innerHTML=(w&&w!='旁白'?`<b class="${cls(w)}">${esc(w)}</b>`:'')+`<span>${rich(t)}</span>`;e.className=w&&w!='旁白'?'on':'on n';clearTimeout(sub.t);sub.t=setTimeout(()=>e.className='',ms||3200)}
+function typeInto(el,t,ms){return new Promise(r=>{let i=0;const iv=setInterval(()=>{i++;el.textContent=t.slice(0,i);if(i>=t.length){clearInterval(iv);r()}},ms||60)})}
+function fadeIn(o,html){const d=document.createElement('div');d.className='ovl';d.innerHTML=html;o.appendChild(d);requestAnimationFrame(()=>requestAnimationFrame(()=>d.classList.add('in')));return d}
+function homeBtn(o){const b=fadeIn(o,'<button class="btn" id="rs">回到首頁</button>');$('rs').onclick=()=>showTitle();return b}
+// 結局演出 end()：364712 → HE，786913 → BE（錯碼不會進結局）。結局畫面滿版（隱藏右側工具欄）。
+async function end(){S.over=1;const win=S.code=='364712',g=GID,o=$('ov');
+ $('g').classList.add('full');$('ctl').style.display='none';tY=norm(0);tP=0;tF=60;doorK=.016;   // 門緩慢打開約 3 秒
+ if(win){
+  whiteMat.emissive.set(0xfff6d8);whiteMat.emissiveIntensity=1.8;back3.material.emissive.set(0xfff6d8);
+  S.exit=1;await wait(2400);if(g!=GID)return;walkV=.011;walkZ=-4.6;await wait(6000);if(g!=GID)return;   // 一步一步走向白光約 6 秒
+  o.style.transition='opacity 2.2s';o.style.background='#fff';o.style.color='#333';o.className='on';await wait(2200);if(g!=GID)return;
+  const a=fadeIn(o,'<div>電梯門真正打開，外面的日光灑了進來。</div>');await wait(1500);
+  const b=fadeIn(o,'<div class="typ" style="color:#555"></div>');hist.push({w:'警衛室',t:'……這次居然被你逃出去了。',c:'m'});
+  await typeInto(b.firstChild,'身後傳來熟悉的聲音：「……這次居然被你逃出去了。」\n你沒有回頭。',60);await wait(1600);
+  a.classList.remove('in');b.classList.remove('in');await wait(1600);if(g!=GID)return;a.remove();b.remove();
+  fadeIn(o,'<div style="font-size:22px;letter-spacing:.2em;color:#222">— HE · 成功逃脫 —</div>');await wait(1200);homeBtn(o)}
+ else{
+  whiteMat.emissive.set(0x000000);whiteMat.emissiveIntensity=1;back3.material.emissive.set(0x000000);corr.visible=false;outG.visible=true;swayA=.016;   // 手持運鏡感，全程略微晃動
+  S.exit=1;sub('電梯門打開，門外是一條看不到盡頭的走廊。','旁白',4500);await wait(3000);if(g!=GID)return;   // 門緩慢打開，外面一片漆黑
+  walkV=.0167;walkZ=-5;await wait(5000);if(g!=GID)return;                                 // 跟著玩家一步一步走進黑暗 5 秒
+  o.style.transition='opacity .8s';o.className='on';await wait(2000);if(g!=GID)return;    // 再 2 秒
+  walkV=0;S.exit=0;dL.position.x=-.35;dR.position.x=.05;roomForce=true;                  // 畫面正中央：比開始界面再拉遠 30 公分的電梯正面
+  cam.position.z=walkZ=-3.5;yaw=tY=Math.PI-.079;pit=tP=-.13;fov=tF=36;
+  o.style.transition='opacity 2.8s';o.className='';await wait(3000);if(g!=GID)return;     // 黑暗中漸漸顯現
+  SFX.play('ding');await wait(900);S.exit=1;await wait(3200);if(g!=GID)return;            // 叮咚 → 開門（正是原本那台）
+  await wait(1400);                                                                       // 站定、不可置信
+  sub('你渾渾噩噩，不敢置信，脚卻不受控制地走向電梯内。電梯門緩緩關閉，再次墜落，伴隨一聲沉重的墜落巨響……','旁白',8000);
+  panTo(norm(Math.PI),0,60,1600);walkV=.011;walkZ=0;while(cam.position.z<-.01){await wait(100);if(g!=GID)return}
+  walkV=0;roomForce=null;await turnTo(0,3200);if(g!=GID)return;                          // 慢慢轉身回到遊戲一開始的視角
+  doorK=.02;S.exit=0;await wait(2200);if(g!=GID)return;
+  S.shk=1;SFX.play('crash');fx('sk');flicker(600000);await wait(1000);if(g!=GID)return;   // 故障：震動 → 燈光一直不規律閃爍
+  await subWait('你好，請問你是被困在電梯裡了嗎？喂，聽得到嗎，有沒有受傷？','警衛室');S.shk=0;if(g!=GID)return;   // 閃爍 1 秒後出現，點掉後 2 秒
+  await wait(2000);o.style.transition='opacity 3s';o.className='on';await wait(3200);if(g!=GID)return;
+  fadeIn(o,'<div style="font-size:22px;letter-spacing:.2em;color:#e66">— BE · 落入循環 —</div>');await wait(1200);homeBtn(o)}}
+// 結局字幕需點擊才繼續（▼）
+function subWait(t,w){return new Promise(r=>{sub(t,w,1e9);const e=$('sub'),sc2=$('scene');e.classList.add('wait');const h=()=>{sc2.removeEventListener('click',h);e.className='';r()};setTimeout(()=>sc2.addEventListener('click',h),300)})}
+function turnTo(a,ms){return new Promise(r=>{const s=tY,e=norm(a),t0=performance.now();(function st(){const k=Math.min(1,(performance.now()-t0)/ms);tY=s+(e-s)*(k*k*(3-2*k));if(k<1)requestAnimationFrame(st);else r()})()})}
+// 【CONTRACT】H：互動處理器表。key 必須等於 3D 物件 userData.h。btn(o)=數字按鈕（含卡死按鈕撬開流程）、pc(o)=海報角落(o.userData.k=1/2)。
+// 新增只提供資訊的物件：sheet 保養紀錄表｜cctv 監視器｜cap 載重銘牌｜lamp 吸頂燈｜vent 通風口
+const H={
+ btn(o){const d=o.userData.d;o.userData.p=1;
+  if(o.userData.stuck&&!S.fixed){if(!S.pried){if(sel=='key')run(evPry);else note('這個按鈕卡死了，按不下去。');return}
+   if(!S.paper)return note('按鈕被撬開了，裡面塞著東西。');S.fixed=1;note('你把按鈕按回了原位。');return}
+  if(!S.sol)return note('按下去沒有任何反應。');
+  if(S.ent||codeLock)return;S.code=(S.code||'')+d;drawDisp(S.code,1);
+  if(S.code.length==6){if(S.code=='364712'||S.code=='786913')run(evEnter);
+   else{codeLock=1;(async()=>{for(let i=0;i<2;i++){drawDisp(S.code,0);await wait(220);drawDisp(S.code,1);await wait(220)}S.code='';drawDisp('',1);codeLock=0})()}}},
+ paper:()=>run(evPaper),
+ plate:()=>{},
+ scr:()=>{if(S.sol)return note('螢幕亮著。');if(S.scr)note('螢幕一片漆黑。');else run(evScr)},
+ hatch:()=>{if(S.hat)run(evHatchClose);else if(sel=='rail')run(evHatch);else note('天花板中央有一塊方形的逃生蓋板，扣得很緊，伸手搭不到。')},
+ card:()=>run(evCard),
+ flap:()=>{S.lift=!S.lift;note(S.lift?'地毯的角被你掀了起來，翻了過去。':'你把地毯鋪了回去。')},
+ key:()=>run(evKey),
+ railf:()=>run(evRail),
+ mdoor:()=>{if(S.mclosed)return note('維修暗門上了鎖。');if(S.open)return;if(sel=='dkey')run(evOpen);else if(sel=='key')note('看來這裏需要另一把鑰匙。');else note('維修暗門上了鎖。')},
+ mach:()=>machine(),
+ note:()=>run(evNote),
+ poster:()=>note('海報貼得很牢。'),
+ pc:o=>{const k=o.userData.k;if(S['p'+k])return note('這個角已經翘起來了。');S['p'+k]=1;S.pt=k==1?.12:-.12;if(S.p1&&S.p2)run(evPoster);else note('海報的一角被你撕開了。')},
+ rail:()=>note('扶手看起來老舊鬆動。'),
+ mic:()=>{if(!S.rev)return note('對講機只有滋滋的雜音。');const L=['對講機裡傳出輕笑。「怎麼，想我了嗎？」','「你是想找人聊天嗎？」','「累了就起來動一動。」'];note(L[(S.micN||0)%3],'警衛室');S.micN=(S.micN||0)+1},
+ door:()=>{if(S.ent)return;if(sel=='key')note('......沒人會那麽做吧，我是白癡嗎？');else if(sel=='rail')note('可惡，撬不開。');else note('電梯門紋風不動。')},
+ sheet:()=>note('泛黃的保養紀錄表，10 月 7 日之後就再也沒人簽過名了。'),
+ cctv:()=>note('沒有運作的監視器，但總覺得鏡頭背後有什麼東西正在盯着你看。'),
+ cap:()=>note('許可證編號的後半段被刻意刮花了，看起來這台電梯已經很久沒有通過正式安檢。'),
+ lamp:()=>note('發著慘白微光的吸頂燈，燈罩裡面躺著好幾隻乾癟的小飛蟲。燈管偶爾會發出極細微的電流滋滋聲。'),
+ vent:()=>note('窄小的金屬百葉通風口。縫隙裡積滿了灰塵，湊近也感覺不到半點風在流動，裡面黑漆漆的什麼也看不見。')};
+
+// ╔═══ 區塊 B：Three.js 場景 ═══╗
+// 座標系：電梯內部 x ±1.0、y 0~2.6、z ±1.6；門/面板/暗門在 z=-1.6 牆（相機正前方），海報在 z=+1.6 牆（身後），
+//        左牆 x=-1 有扶手、右牆 x=+1 有扶手；相機固定在 (0,1.4,0)，只轉動視角與 fov。
+// 【CONTRACT】HOT：所有可點擊 mesh 的清單（tag/hit 會 push）。pick() 只對 HOT 做 raycast，並以 userData.f 過濾。
+const T=THREE,HOT=[];
+// ── 渲染器 / 相機 / 燈光（【VISUAL】冷白慘淡的吸頂燈＋暗角；可自由調整色調、曝光、燈光強度）──
+const R=new T.WebGLRenderer({antialias:true});R.setPixelRatio(Math.min(devicePixelRatio,1.5));
+const cvs=R.domElement;cvs.style.cssText='width:100%;height:100%;display:block;touch-action:none;cursor:grab';$('scene').insertBefore(cvs,$('scene').firstChild);
+const sc=new T.Scene(),cam=new T.PerspectiveCamera(65,4/3,.05,30);cam.position.set(0,1.4,0);cam.rotation.order='YXZ';
+R.shadowMap.enabled=true;R.shadowMap.type=T.PCFSoftShadowMap;R.toneMapping=T.ACESFilmicToneMapping;R.toneMappingExposure=.9;R.outputEncoding=T.sRGBEncoding;
+const SM=o=>new T.MeshStandardMaterial(Object.assign({roughness:.9,metalness:0},o));
+// 反射用環境：亮度刻意壓低，避免不鏽鋼門板過曝死白
+function makeEnv(rd){const e=new T.Scene(),L=(w,h,d,x,y,z,c,k)=>{const m=new T.Mesh(new T.BoxGeometry(w,h,d),SM({color:0,emissive:c,emissiveIntensity:k}));m.position.set(x,y,z);e.add(m)};
+ const r=new T.Mesh(new T.BoxGeometry(30,30,30),SM({color:0,emissive:0x0b0d0c,emissiveIntensity:1,side:T.BackSide}));e.add(r);
+ L(8,.4,8,0,13,0,0xeef8f2,5);L(20,.4,20,0,-13,0,0x22262a,1.1);
+ L(.4,10,14,-13,2,0,0xc9d4cf,2.2);L(.4,10,14,13,2,0,0xc9d4cf,2.2);L(14,10,.4,0,2,-13,0xc9d4cf,1.6);L(14,10,.4,0,2,13,0xc9d4cf,1.6);
+ for(let i=-2;i<=2;i++){L(.5,12,.4,i*5,2,-12.6,0xffffff,3.2);L(.5,12,.4,i*5,2,12.6,0xffffff,3.2);L(.4,12,.5,-12.6,2,i*5,0xffffff,3.2);L(.4,12,.5,12.6,2,i*5,0xffffff,3.2)}
+ const pm=new T.PMREMGenerator(rd),tx=pm.fromScene(e,.04).texture;pm.dispose();return tx}
+try{sc.environment=makeEnv(R)}catch(e){}
+const amb=new T.AmbientLight(0x8fa49b,.22),pl=new T.PointLight(0xa8bdb3,.3,0,1);pl.position.set(0,1.3,1.1);
+const sp=new T.SpotLight(0xf0fbf4,2.6,0,1.22,.8,1.1);sp.position.set(0,2.5,.5);sp.target.position.set(0,0,-.2);sp.castShadow=true;sp.shadow.mapSize.set(1024,1024);sp.shadow.bias=-.0004;sp.shadow.normalBias=.02;sp.shadow.camera.near=.1;sp.shadow.camera.far=6;
+sc.add(amb,pl,sp,sp.target);
+let comp=null;
+try{if(T.EffectComposer&&T.UnrealBloomPass&&T.GammaCorrectionShader){const rt=new T.WebGLRenderTarget(640,480,{samples:4,type:T.HalfFloatType,format:T.RGBAFormat});comp=new T.EffectComposer(R,rt);comp.setPixelRatio(R.getPixelRatio());comp.addPass(new T.RenderPass(sc,cam));comp.addPass(new T.UnrealBloomPass(new T.Vector2(640,480),.3,.6,.86));comp.addPass(new T.ShaderPass(T.GammaCorrectionShader))}}catch(e){comp=null}
+let fN=7000,fS=-1;
+const LM=new T.LineBasicMaterial({color:0x0a0a0a}),mat=c=>SM({color:c});
+function smoothGeo(g){const nn0=g.attributes.normal;if(!nn0)return g;const gg=g.clone(),p=gg.attributes.position,nn=gg.attributes.normal,mp=new Map(),key=i=>Math.round(p.getX(i)*1e3)+','+Math.round(p.getY(i)*1e3)+','+Math.round(p.getZ(i)*1e3);
+ for(let i=0;i<p.count;i++){const k=key(i);let a=mp.get(k);if(!a){a=[0,0,0];mp.set(k,a)}a[0]+=nn.getX(i);a[1]+=nn.getY(i);a[2]+=nn.getZ(i)}
+ for(let i=0;i<p.count;i++){const a=mp.get(key(i)),l=Math.hypot(a[0],a[1],a[2])||1;nn.setXYZ(i,a[0]/l,a[1]/l,a[2]/l)}return gg}
+// 黑色卡通描邊（保留低多邊形味道，但比原版細）
+function outlineOf(m,t){const g=m.geometry;g.computeBoundingBox();const sz=g.boundingBox.getSize(new T.Vector3()),mx=Math.max(sz.x,sz.y,sz.z),th=t||Math.min(.008,Math.max(.0025,mx*.014));
+ const mt=new T.MeshBasicMaterial({color:0x000000,side:T.BackSide}),u={value:th};mt.userData.u=u;mt.userData.base=th;
+ mt.onBeforeCompile=sh=>{sh.uniforms.uT=u;sh.vertexShader='uniform float uT;\n'+sh.vertexShader.replace('#include <begin_vertex>','vec3 transformed=position+normalize(normal)*uT/length(modelMatrix[0].xyz);')};
+ const h=new T.Mesh(smoothGeo(g),mt);h.userData.hull=1;return h}
+const ed=m=>{const ty=m.geometry.type;if(ty=='PlaneGeometry'||ty=='ShapeGeometry')m.add(new T.LineSegments(new T.EdgesGeometry(m.geometry),LM));else m.add(outlineOf(m));m.castShadow=m.receiveShadow=true;return m};
+function cv(w,h,f){const c=document.createElement('canvas');c.width=w;c.height=h;const g=c.getContext('2d');f(g,w,h);const t=new T.CanvasTexture(c);t.anisotropy=4;t.encoding=T.sRGBEncoding;return{t,g,c}}
+function box(w,h,d,c,x,y,z,p){const m=ed(new T.Mesh(new T.BoxGeometry(w,h,d),typeof c=='object'?c:mat(c)));m.position.set(x,y,z);(p||sc).add(m);return m}
+function face(w,h,d,map,sd){const s=mat(sd||0x4c5156);return ed(new T.Mesh(new T.BoxGeometry(w,h,d),[s,s,s,s,SM({map}),s]))}
+// 【CONTRACT】tag(mesh,userData)：讓「既有可見 mesh」可被點擊；hit(w,h,d,x,y,z,userData)：建「隱形判定盒」（opacity 0）。userData = {h:處理器名, g:zoom群組, f:可點條件, ...}
+const tag=(m,o)=>{m.userData=o;HOT.push(m);return m};
+const hit=(w,h,d,x,y,z,o)=>{const m=new T.Mesh(new T.BoxGeometry(w,h,d),new T.MeshBasicMaterial({transparent:true,opacity:0,depthWrite:false}));m.position.set(x,y,z);sc.add(m);return tag(m,o)};
+
+// ═══════ 【VISUAL】程式化貼圖工具（全部用離屏 canvas 畫，再包成 CanvasTexture）═══════
+const mkT=(c,srgb)=>{const t=new T.CanvasTexture(c);t.wrapS=t.wrapT=T.RepeatWrapping;t.anisotropy=8;if(srgb)t.encoding=T.sRGBEncoding;return t};
+const cnv=N=>{const c=document.createElement('canvas');c.width=c.height=N;return c};
+const cnv2=(w,h)=>{const c=document.createElement('canvas');c.width=w;c.height=h;return c};
+// 可重播亂數：同一個 seed 畫在「顏色 / 粗糙度 / 凹凸」三張圖上，刮痕位置才會對得上
+let _sd=1;const seed=n=>{_sd=n>>>0},prng=()=>{_sd+=0x6D2B79F5;let t=_sd;t=Math.imul(t^t>>>15,t|1);t^=t+Math.imul(t^t>>>7,t|61);return((t^t>>>14)>>>0)/4294967296},rnd=(a,b)=>a+prng()*(b-a);
+function noiseFill(g,w,h,r,gg,b,amp){const im=g.createImageData(w,h),d=im.data;for(let i=0;i<w*h;i++){const k=(Math.random()-.5)*amp;d[i*4]=r+k;d[i*4+1]=gg+k;d[i*4+2]=b+k;d[i*4+3]=255}g.putImageData(im,0,0)}
+function blotch(g,w,h,n,col,a0,a1,r0,r1,y0,y1){for(let i=0;i<n;i++){const x=prng()*w,y=y0==null?prng()*h:rnd(y0,y1),r=rnd(r0,r1),q=g.createRadialGradient(x,y,0,x,y,r);q.addColorStop(0,`rgba(${col},${rnd(a0,a1).toFixed(3)})`);q.addColorStop(1,`rgba(${col},0)`);g.fillStyle=q;g.fillRect(x-r,y-r,2*r,2*r)}}
+function scratches(g,w,h,n,col,a,len,y0,y1){g.lineCap='round';for(let i=0;i<n;i++){const x=prng()*w,y=y0==null?prng()*h:rnd(y0,y1),an=rnd(-.45,.45)+(prng()<.25?Math.PI/2:0),l=rnd(len*.25,len),ex=x+Math.cos(an)*l,ey=y+Math.sin(an)*l;
+ g.strokeStyle=`rgba(${col},${rnd(a*.35,a).toFixed(3)})`;g.lineWidth=rnd(.5,1.5);g.beginPath();g.moveTo(x,y);g.quadraticCurveTo((x+ex)/2+rnd(-4,4),(y+ey)/2+rnd(-4,4),ex,ey);g.stroke()}}
+function drips(g,w,h,n,col,a,y0,y1){for(let i=0;i<n;i++){const x=prng()*w,y=rnd(y0,y1),l=rnd(20,120),q=g.createLinearGradient(0,y,0,y+l);q.addColorStop(0,`rgba(${col},${a})`);q.addColorStop(1,`rgba(${col},0)`);g.fillStyle=q;g.fillRect(x,y,rnd(1,3),l)}}
+// 拉絲不鏽鋼：細密噪點＋微弱拉絲＋刮痕＋手垢（顏色 / 粗糙度 / 凹凸 三張共用一組亂數）
+function steelMaps(){const N=1024,cr=cnv(N),cb=cnv(N),cc=cnv(N),gr=cr.getContext('2d'),gb=cb.getContext('2d'),gc=cc.getContext('2d'),ir=gr.createImageData(N,N),ib=gb.createImageData(N,N),ic=gc.createImageData(N,N),a=ir.data,b=ib.data,c=ic.data;
+ const row=new Float32Array(N);let v=0;for(let y=0;y<N;y++){v=v*.55+(Math.random()-.5)*.45;row[y]=v}
+ for(let y=0;y<N;y++){let n=0;for(let x=0;x<N;x++){n=n*.93+(Math.random()-.5)*.14;const px=Math.random()-.5,i=(y*N+x)*4;
+   const r=Math.max(0,Math.min(1,.72+row[y]*.12+n*.55+px*.05)),h=Math.max(0,Math.min(1,.5+row[y]*.14+n*.5+px*.06)),cl=Math.max(0,Math.min(1,.9+row[y]*.06+n*.25+px*.04));
+   a[i]=a[i+1]=a[i+2]=r*255;a[i+3]=255;b[i]=b[i+1]=b[i+2]=h*255;b[i+3]=255;c[i]=c[i+1]=cl*255;c[i+2]=cl*250;c[i+3]=255}}
+ gr.putImageData(ir,0,0);gb.putImageData(ib,0,0);gc.putImageData(ic,0,0);
+ seed(7);scratches(gc,N,N,700,'255,255,255',.3,70);seed(7);scratches(gr,N,N,700,'255,255,255',.4,70);seed(7);scratches(gb,N,N,700,'0,0,0',.55,70);
+ seed(8);scratches(gc,N,N,260,'40,40,40',.25,40);seed(8);scratches(gb,N,N,260,'0,0,0',.6,40);
+ seed(11);blotch(gc,N,N,46,'70,66,58',.05,.18,30,150);seed(11);blotch(gr,N,N,46,'255,255,255',.06,.2,30,150);
+ seed(12);blotch(gc,N,N,30,'30,32,30',.04,.1,8,24);
+ return{r:mkT(cr),b:mkT(cb),m:mkT(cc,1)}}
+const SMP=steelMaps();
+// 【VISUAL】材質工廠：steelMat(重複) 舊拉絲不鏽鋼（含刮痕、手垢）；SM() 為 MeshStandardMaterial 包裝；mat(色)；outlineOf()/ed() 加黑色描邊。
+const steelMat=(rep,off)=>{const r=SMP.r.clone(),b=SMP.b.clone(),m=SMP.m.clone();[r,b,m].forEach(t=>{t.needsUpdate=true;t.repeat.set(rep,rep);if(off)t.offset.set(off,off)});return SM({color:0xd0d4d5,map:m,metalness:.92,roughness:.36,roughnessMap:r,bumpMap:b,bumpScale:.003,envMapIntensity:1.15})};
+const MW=steelMat(2),MWB=MW.clone();MWB.side=T.BackSide;
+// 壁板：灰綠紋理美耐板（參考圖十一）＋垂直接縫＋腰部刮痕＋手垢＋下緣污漬
+function wallSet(wm,hm,seams){const P=300,w=Math.round(wm*P),h=Math.round(hm*P),C=[cnv2(w,h),cnv2(w,h),cnv2(w,h)],[gc,gr,gb]=C.map(c=>c.getContext('2d'));
+ noiseFill(gc,w,h,126,129,116,24);noiseFill(gr,w,h,210,210,210,36);noiseFill(gb,w,h,128,128,128,70);
+ seed(3);for(let i=0;i<w*h/55;i++){const x=prng()*w,y=prng()*h,l=rnd(2,6),an=prng()*Math.PI,lt=prng()<.5;gc.strokeStyle=lt?'rgba(255,255,250,.07)':'rgba(0,0,0,.08)';gc.lineWidth=1;gc.beginPath();gc.moveTo(x,y);gc.lineTo(x+Math.cos(an)*l,y+Math.sin(an)*l);gc.stroke()}
+ seed(5);blotch(gc,w,h,26,'38,42,34',.05,.13,40,190);seed(6);blotch(gc,w,h,14,'232,236,222',.03,.07,50,200);
+ seed(9);blotch(gc,w,h,22,'52,48,38',.06,.15,8,34,h-1.6*P,h-.85*P);seed(9);blotch(gr,w,h,22,'60,60,60',.1,.25,8,34,h-1.6*P,h-.85*P);
+ seed(10);drips(gc,w,h,16,'60,52,36',.12,h-2.3*P,h-.6*P);
+ [gc,gr].forEach((g,k)=>{const q=g.createLinearGradient(0,h,0,h-.5*P);q.addColorStop(0,k?'rgba(255,255,255,.3)':'rgba(28,26,18,.5)');q.addColorStop(1,'rgba(0,0,0,0)');g.fillStyle=q;g.fillRect(0,h-.5*P,w,.5*P)});
+ {const q=gc.createLinearGradient(0,0,0,.25*P);q.addColorStop(0,'rgba(10,12,10,.4)');q.addColorStop(1,'rgba(0,0,0,0)');gc.fillStyle=q;gc.fillRect(0,0,w,.25*P)}
+ seed(13);scratches(gc,w,h,170,'232,234,222',.4,55,h-1.5*P,h-.25*P);seed(13);scratches(gr,w,h,170,'255,255,255',.5,55,h-1.5*P,h-.25*P);seed(13);scratches(gb,w,h,170,'30,30,30',.75,55,h-1.5*P,h-.25*P);
+ seams.forEach(s=>{const x=Math.round(s*P);gc.fillStyle='#34362f';gc.fillRect(x-2,0,4,h);gc.fillStyle='rgba(255,255,245,.2)';gc.fillRect(x+2,0,1,h);gb.fillStyle='#1a1a1a';gb.fillRect(x-2,0,4,h);gb.fillStyle='#bbb';gb.fillRect(x+2,0,1,h);gr.fillStyle='#ddd';gr.fillRect(x-2,0,4,h)});
+ const t=C.map((c,i)=>mkT(c,i==0));return SM({map:t[0],roughnessMap:t[1],bumpMap:t[2],bumpScale:.006,roughness:1,metalness:.05,envMapIntensity:.35,side:T.BackSide})}
+// 地板：灰色仿石紋塑膠地磚＋鞋印擦痕＋角落積灰
+function floorMat(){const P=300,w=Math.round(1.7*P),h=Math.round(3.2*P),C=[cnv2(w,h),cnv2(w,h)],[gc,gb]=C.map(c=>c.getContext('2d'));
+ noiseFill(gc,w,h,92,93,90,16);noiseFill(gb,w,h,128,128,128,40);
+ seed(21);blotch(gc,w,h,130,'58,58,56',.08,.22,10,60);seed(22);blotch(gc,w,h,70,'160,160,154',.05,.12,10,50);
+ seed(23);gc.lineCap='round';for(let i=0;i<40;i++){let x=prng()*w,y=prng()*h;gc.strokeStyle=`rgba(190,190,182,${rnd(.04,.1).toFixed(2)})`;gc.lineWidth=rnd(1,3);gc.beginPath();gc.moveTo(x,y);for(let k=0;k<6;k++){x+=rnd(-40,40);y+=rnd(-40,40);gc.lineTo(x,y)}gc.stroke()}
+ seed(24);scratches(gc,w,h,110,'12,12,12',.35,45);seed(24);scratches(gb,w,h,110,'40,40,40',.5,45);
+ [[0,0,w,.14*P,0,1],[0,h-.14*P,w,.14*P,0,-1],[0,0,.12*P,h,1,0],[w-.12*P,0,.12*P,h,-1,0]].forEach(r=>{const q=r[4]?gc.createLinearGradient(r[4]>0?0:w,0,r[4]>0?.12*P:w-.12*P,0):gc.createLinearGradient(0,r[5]>0?0:h,0,r[5]>0?.14*P:h-.14*P);q.addColorStop(0,'rgba(20,18,14,.55)');q.addColorStop(1,'rgba(0,0,0,0)');gc.fillStyle=q;gc.fillRect(r[0],r[1],r[2],r[3])});
+ const t=C.map((c,i)=>mkT(c,i==0));return SM({map:t[0],bumpMap:t[1],bumpScale:.003,roughness:.82,metalness:0,envMapIntensity:.4})}
+const flo=floorMat();flo.side=T.BackSide;
+// 【VISUAL】電梯內艙 room：窄長比例 1.7×2.6×3.2（x ±.85）。【CONTRACT】主迴圈依相機 z 切換 room.visible（走出電梯時）。
+const WSd=wallSet(3.2,2.6,[.64,1.28,1.92,2.56]),WFr=wallSet(1.7,2.6,[.57,1.13]),WBk=wallSet(1.7,2.6,[.57,1.13]);
+const room=new T.Mesh(new T.BoxGeometry(1.7,2.6,3.2),[WSd,WSd,SM({visible:false}),flo,WBk,SM({visible:false})]);room.position.y=1.3;room.receiveShadow=true;sc.add(room);
+// 前牆改由三塊平面拼成，在維修暗門處留出開口（暗箱才能真的凹進牆內）
+{const fm=WFr.clone();fm.side=T.FrontSide;[[1.7,1.89,0,1.655],[1.7,.21,0,.105],[1.36,.5,-.17,.46]].forEach(a=>{const ge=new T.PlaneGeometry(a[0],a[1]),p=ge.attributes.position,uv=ge.attributes.uv;for(let i=0;i<p.count;i++)uv.setXY(i,(p.getX(i)+a[2]+.85)/1.7,(p.getY(i)+a[3])/2.6);const m=new T.Mesh(ge,fm);m.position.set(a[2],a[3]-1.3,-1.6);m.receiveShadow=true;room.add(m)})}
+// 轉角金屬收邊條（取代純黑描邊）
+{const eb=SM({color:0x6d716f,metalness:.85,roughness:.45}),WX=.85-.014,WZ=1.6-.014,e=.03,S=(w,h,d,x,y,z)=>{const m=new T.Mesh(new T.BoxGeometry(w,h,d),eb);m.position.set(x,y,z);room.add(m)};
+ [[-1,-1],[1,-1],[-1,1],[1,1]].forEach(a=>S(e,2.6,e,a[0]*WX,0,a[1]*WZ));
+ [-1.285].forEach(y=>{S(1.7,e,e,0,y,-WZ);S(1.7,e,e,0,y,WZ);S(e,e,3.2,-WX,y,0);S(e,e,3.2,WX,y,0)});
+ [1.285].forEach(y=>{S(1.7,.05,.02,0,y-.01,-1.59);S(1.7,.05,.02,0,y-.01,1.59);S(.02,.05,3.2,-.84,y-.01,0);S(.02,.05,3.2,.84,y-.01,0)})}
+// 不鏽鋼踢腳板（門洞處留空）
+{const km=steelMat(3);km.color.set(0x9da2a3);const K=(w,d,x,z)=>{const m=new T.Mesh(new T.BoxGeometry(w,.1,d),km);m.position.set(x,.05,z);m.receiveShadow=true;sc.add(m)};
+ K(.014,3.2,-.843,0);K(.014,3.2,.843,0);K(1.7,.014,0,1.593);K(.21,.014,-.745,-1.593);K(.51,.014,.595,-1.593)}
+// ───────── 天花板逃生口（【VISUAL】外觀可全換）─────────
+// 【CONTRACT】HZ(口中心 z)、HH(半寬)、hatG(蓋板群組)、hatP(0~1 開啟進度)、cavL(井道燈)、hatHit(判定盒,h:'hatch')、sm()(smoothstep)。
+//             蓋板動畫在主迴圈：先 sm(hatP/.35) 上抬 .13，再 sm((hatP-.35)/.65) 側滑 .78。換蓋板模型→掛進 hatG 即可。
+const HZ=-.6,HH=.35,hatM=steelMat(1.4),hatD=SM({color:0x2c3034,metalness:.9,roughness:.45});let hatP=0;
+const sm=t=>{t=Math.max(0,Math.min(1,t));return t*t*(3-2*t)};
+// 天花板：烤漆鋼板，泛黃水漬、接縫、灰塵
+const ceilT=(()=>{const P=300,w=Math.round(1.7*P),h=Math.round(3.2*P),C=[cnv2(w,h),cnv2(w,h)],[gc,gb]=C.map(c=>c.getContext('2d'));
+ noiseFill(gc,w,h,170,174,168,14);noiseFill(gb,w,h,128,128,128,30);
+ seed(31);blotch(gc,w,h,30,'90,92,84',.05,.12,30,140);
+ seed(32);for(let i=0;i<4;i++){const x=prng()*w,y=prng()*h,r=rnd(30,80);gc.strokeStyle='rgba(120,92,40,.28)';gc.lineWidth=rnd(2,5);gc.beginPath();gc.ellipse(x,y,r,r*rnd(.6,1),prng()*3,0,7);gc.stroke();const q=gc.createRadialGradient(x,y,0,x,y,r);q.addColorStop(0,'rgba(140,110,50,.06)');q.addColorStop(1,'rgba(140,110,50,.16)');gc.fillStyle=q;gc.beginPath();gc.ellipse(x,y,r,r*.8,0,0,7);gc.fill()}
+ [.8,1.6,2.4].forEach(s=>{const y=Math.round(s*P);gc.fillStyle='rgba(30,32,30,.6)';gc.fillRect(0,y-1,w,3);gb.fillStyle='#111';gb.fillRect(0,y-1,w,3)});
+ [[0,0,w,.18*P],[0,h-.18*P,w,.18*P]].forEach((r,k)=>{const q=gc.createLinearGradient(0,k?h:0,0,k?h-.18*P:.18*P);q.addColorStop(0,'rgba(20,20,16,.45)');q.addColorStop(1,'rgba(0,0,0,0)');gc.fillStyle=q;gc.fillRect(r[0],r[1],r[2],r[3])});
+ const t=C.map((c,i)=>{const x=mkT(c,i==0);x.repeat.set(1/1.7,1/3.2);x.offset.set(.5,.5);return x});return SM({map:t[0],bumpMap:t[1],bumpScale:.003,roughness:.75,metalness:.2,envMapIntensity:.4})})();
+{const s=new T.Shape();s.moveTo(-.85,-1.6);s.lineTo(.85,-1.6);s.lineTo(.85,1.6);s.lineTo(-.85,1.6);s.closePath();const h=new T.Path();h.moveTo(-HH,HZ-HH);h.lineTo(-HH,HZ+HH);h.lineTo(HH,HZ+HH);h.lineTo(HH,HZ-HH);h.closePath();s.holes.push(h);
+ const c=new T.Mesh(new T.ShapeGeometry(s),ceilT);c.rotation.x=Math.PI/2;c.position.y=2.6;c.receiveShadow=true;sc.add(c);
+ // raised rim frame around the opening
+ const ro=HH+.07;[[2*ro,.07,0,HZ-HH-.035],[2*ro,.07,0,HZ+HH+.035]].forEach(a=>{const m=ed(new T.Mesh(new T.BoxGeometry(a[0],.03,a[1]),hatD));m.position.set(a[2],2.585,a[3]);sc.add(m)});
+ [-1,1].forEach(k=>{const m=ed(new T.Mesh(new T.BoxGeometry(.07,.03,2*HH),hatD));m.position.set(k*(HH+.035),2.585,HZ);sc.add(m)});
+ // shaft: dark box above, guide rails, cables, ribs
+ const sh=SM({color:0x181a1d,roughness:1,metalness:.2,side:T.BackSide});const cav=new T.Mesh(new T.BoxGeometry(1.1,1.6,1.0),sh);cav.position.set(0,3.4,HZ);sc.add(cav);
+ const dk=SM({color:0x25282b,roughness:.7,metalness:.8});
+ [-.38,.38].forEach(x=>{const r=new T.Mesh(new T.BoxGeometry(.05,1.5,.05),dk);r.position.set(x,3.35,HZ-.44);sc.add(r)});
+ [3.0,3.5].forEach(y=>{const r=new T.Mesh(new T.BoxGeometry(1.08,.04,.04),dk);r.position.set(0,y,HZ-.46);sc.add(r)});
+ [-.2,.05,.3].forEach((x,i)=>{const r=new T.Mesh(new T.CylinderGeometry(.014,.014,1.5,6),SM({color:0x0c0d0e,roughness:.6}));r.position.set(x,3.35,HZ+.3+i*.04);sc.add(r)});
+ const far=new T.Mesh(new T.PlaneGeometry(.5,.12),new T.MeshBasicMaterial({color:0x3a2f22}));far.rotation.x=Math.PI/2;far.position.set(0,4.18,HZ);sc.add(far)}
+// 【VISUAL】蓋板本體 hatG：厚金屬板＋把手＋螺栓（子物件可任意替換，勿動 hatG 本身與其 position 由主迴圈控制）
+const hatG=new T.Group();hatG.position.set(0,2.605,HZ);sc.add(hatG);
+{const sl=ed(new T.Mesh(new T.BoxGeometry(2*HH+.06,.035,2*HH+.06),hatM));hatG.add(sl);
+ const hd=ed(new T.Mesh(new T.BoxGeometry(.22,.02,.05),hatD));hd.position.set(0,-.03,.2);hatG.add(hd);
+ [[-.3,-.3],[.3,-.3],[-.3,.3],[.3,.3]].forEach(a=>{const b=new T.Mesh(new T.CylinderGeometry(.018,.018,.012,8),hatD);b.position.set(a[0],-.022,a[1]);hatG.add(b)});
+ // 黃黑警示貼紙
+ const wt=cv(256,64,(g,w,h)=>{for(let i=-2;i<12;i++){g.fillStyle=i%2?'#1a1a1a':'#d9b326';g.beginPath();g.moveTo(i*28,0);g.lineTo(i*28+28,0);g.lineTo(i*28,h);g.lineTo(i*28-28,h);g.fill()}g.fillStyle='rgba(60,50,30,.35)';g.fillRect(0,0,w,h)}).t;
+ const ws=new T.Mesh(new T.PlaneGeometry(.4,.07),SM({map:wt,roughness:.8}));ws.rotation.x=Math.PI/2;ws.position.set(0,-.019,-.22);hatG.add(ws)}
+const hatHit=hit(2*HH+.1,.12,2*HH+.1,0,2.58,HZ,{h:'hatch'});
+const cavL=new T.PointLight(0xffd29a,0,2.6,1.5);cavL.position.set(0,3.0,HZ);sc.add(cavL);
+// 吸頂燈（參考圖十一）：圓形乳白燈罩、金屬圈、卡扣，燈罩內有幾點蟲屍與泛黃污漬
+// 【CONTRACT】lpm（燈罩發光材質）、cm（燈圈發光材質）：主迴圈每幀依閃爍係數改 emissive（保留變數名可維持閃爍）
+const lpE=cv(256,256,(g,w,h)=>{const q=g.createLinearGradient(0,0,0,128);q.addColorStop(0,'#ffffff');q.addColorStop(.75,'#e6e9e6');q.addColorStop(1,'#a9aca7');g.fillStyle=q;g.fillRect(0,0,w,128);g.fillStyle='#8f9089';g.fillRect(0,128,w,128);
+ seed(41);for(let i=0;i<9;i++){const x=prng()*w,y=rnd(80,124);g.fillStyle=`rgba(30,26,20,${rnd(.5,.85).toFixed(2)})`;g.beginPath();g.ellipse(x,y,rnd(2,5),rnd(1.5,3),prng()*3,0,7);g.fill()}
+ const q2=g.createLinearGradient(0,96,0,128);q2.addColorStop(0,'rgba(150,120,60,0)');q2.addColorStop(1,'rgba(150,120,60,.45)');g.fillStyle=q2;g.fillRect(0,96,w*.6,32)}).t;
+const lpm=SM({color:0x111111,emissive:0xeefbf4,emissiveMap:lpE,emissiveIntensity:1.9,roughness:.5,side:T.DoubleSide});
+const lp=new T.Mesh(new T.SphereGeometry(.27,40,12,0,Math.PI*2,0,Math.PI/2),lpm);lp.rotation.x=Math.PI;lp.scale.set(1,.34,1);lp.position.set(0,2.6,.5);sc.add(lp);
+const cm=SM({color:0x111111,emissive:0xdff0e8,emissiveIntensity:.55,roughness:.5});
+{const rim=new T.Mesh(new T.TorusGeometry(.276,.014,8,48),SM({color:0xcfd3d4,metalness:.9,roughness:.3}));rim.rotation.x=Math.PI/2;rim.position.set(0,2.592,.5);sc.add(rim);
+ const gl=new T.Mesh(new T.RingGeometry(.29,.31,48),cm);gl.rotation.x=Math.PI/2;gl.position.set(0,2.598,.5);sc.add(gl);
+ for(let i=0;i<4;i++){const a=i*Math.PI/2+.4,c=new T.Mesh(new T.BoxGeometry(.05,.03,.025),SM({color:0x8d9192,metalness:.8,roughness:.4}));c.position.set(Math.cos(a)*.28,2.585,.5+Math.sin(a)*.28);c.rotation.y=-a;sc.add(c)}}
+// 監視器（壞的，指示燈不亮）＋排風口＋門上樓層燈箱
+{const cg=new T.Group();cg.position.set(-.68,2.6,-1.44);sc.add(cg);
+ const base=new T.Mesh(new T.CylinderGeometry(.075,.075,.02,24),SM({color:0xd9dbd6,roughness:.6}));base.position.y=-.01;cg.add(base);
+ const dome=new T.Mesh(new T.SphereGeometry(.06,24,10,0,Math.PI*2,Math.PI/2,Math.PI/2),SM({color:0x0b0c0d,roughness:.08,metalness:.4,envMapIntensity:1.2}));dome.position.y=-.02;cg.add(dome);
+ const vt=cv(256,96,(g,w,h)=>{g.fillStyle='#8a8d88';g.fillRect(0,0,w,h);for(let i=0;i<10;i++){g.fillStyle='#1b1c1b';g.fillRect(16+i*23,14,12,h-28)}g.fillStyle='rgba(40,38,30,.35)';g.fillRect(0,0,w,h)}).t;
+ const vent=new T.Mesh(new T.PlaneGeometry(.42,.15),SM({map:vt,roughness:.7,metalness:.4}));vent.rotation.x=Math.PI/2;vent.position.set(0,2.597,1.28);sc.add(vent);
+ const lt=cv(256,64,(g,w,h)=>{g.fillStyle='#0b0b0b';g.fillRect(0,0,w,h);g.fillStyle='#3a0d0b';g.font='bold 40px monospace';g.textAlign='center';g.textBaseline='middle';g.fillText('▲  ▼',w/2,h/2+2)}).t;
+ const lb=face(.3,.07,.02,lt,0x9a9e9f);lb.position.set(-.15,2.42,-1.59);sc.add(lb)}
+// 生活感標示：左牆保養紀錄表、右牆載重銘板
+const logSheet=cv(360,480,(g,w,h)=>{g.fillStyle='#e8dcbc';g.fillRect(0,0,w,h);seed(51);blotch(g,w,h,12,'160,130,70',.05,.14,20,90);
+ g.fillStyle='#2a2620';g.font='bold 24px "Noto Sans TC",sans-serif';g.textAlign='center';g.fillText('電梯保養紀錄表',w/2,40);g.font='13px "Noto Sans TC",sans-serif';g.fillText('電梯編號：No.2　　保養週期：每月',w/2,62);
+ g.strokeStyle='rgba(40,36,30,.7)';g.lineWidth=1;const cx=[18,92,190,252,342],y0=76,rh=27;for(let r=0;r<=14;r++){g.beginPath();g.moveTo(18,y0+r*rh);g.lineTo(342,y0+r*rh);g.stroke()}cx.forEach(x=>{g.beginPath();g.moveTo(x,y0);g.lineTo(x,y0+14*rh);g.stroke()});
+ g.font='bold 13px "Noto Sans TC",sans-serif';['日期','保養項目','結果','簽名'].forEach((t,i)=>g.fillText(t,(cx[i]+cx[i+1])/2,y0+18));
+ g.font='italic 14px "Segoe Script","Bradley Hand",cursive';g.fillStyle='rgba(30,40,90,.75)';const dt=['3/04','4/02','5/06','6/03','7/01','8/05','9/02','10/07'];
+ dt.forEach((d,i)=>{const y=y0+(i+1)*rh+18;g.fillText(d,55,y);g.fillText(i==7?'異音 待修':'正常',140,y);g.fillText(i==7?'✗':'✓',221,y);g.beginPath();g.moveTo(262,y-4);for(let k=0;k<6;k++)g.lineTo(266+k*11,y-4+(k%2?-6:4));g.stroke()});
+ g.fillStyle='rgba(120,90,40,.25)';g.beginPath();g.moveTo(w,h);g.lineTo(w-40,h);g.lineTo(w,h-50);g.fill()}).t;
+{const fr=box(.32,.43,.012,0x2b2d2c,-.842,1.55,-.85);fr.rotation.y=Math.PI/2;
+ const sh=new T.Mesh(new T.PlaneGeometry(.29,.39),SM({map:logSheet,roughness:.9}));sh.position.set(-.835,1.55,-.85);sh.rotation.y=Math.PI/2;sc.add(sh);
+ const ac=new T.Mesh(new T.PlaneGeometry(.3,.41),SM({color:0xffffff,transparent:true,opacity:.08,roughness:.05,metalness:.2}));ac.position.set(-.832,1.55,-.85);ac.rotation.y=Math.PI/2;sc.add(ac);
+ const cp=cv(256,128,(g,w,h)=>{const q=g.createLinearGradient(0,0,w,0);q.addColorStop(0,'#9ea2a2');q.addColorStop(.5,'#cfd2d1');q.addColorStop(1,'#9a9e9e');g.fillStyle=q;g.fillRect(0,0,w,h);g.strokeStyle='#4a4d4c';g.lineWidth=3;g.strokeRect(5,5,w-10,h-10);g.fillStyle='#222';g.textAlign='center';g.font='bold 26px "Noto Sans TC",sans-serif';g.fillText('載重 600kg　限乘 8 人',w/2,52);g.font='14px sans-serif';g.fillText('CAPACITY 600 kg   8 PERSONS',w/2,80);g.font='12px "Noto Sans TC",sans-serif';g.fillText('使用許可證 No. 0■■■-12',w/2,104);[[14,14],[w-14,14],[14,h-14],[w-14,h-14]].forEach(p=>{g.fillStyle='#555';g.beginPath();g.arc(p[0],p[1],4,0,7);g.fill()})}).t;
+ const pl2=new T.Mesh(new T.PlaneGeometry(.22,.11),SM({map:cp,metalness:.7,roughness:.4}));pl2.position.set(.846,1.92,-1.2);pl2.rotation.y=-Math.PI/2;sc.add(pl2)}
+// ───────── 按鈕面板（電梯門右側，x≈.68；參考圖三）─────────
+// 【CONTRACT】plate(底板,h:plate,g:panel)｜disp(螢幕,h:scr,g:scr)｜BT[]/btn()(數字鍵,h:btn)｜stuckBtn(卡死鍵)｜hole/ball(撬開後的洞與紙球,h:paper)｜mic 隱形盒(h:mic)
+// 【VISUAL】面板貼圖 pc 為拉絲不鏽鋼條＋螺絲＋對講機孔；按鈕為圓形鍍鉻圈＋藍色數字；按下發光由主迴圈寫 userData.fm.emissive（fm＝按鈕外圈材質）。
+const pc=cv(340,1350,(g,w,h)=>{g.fillStyle='#a9adae';g.fillRect(0,0,w,h);
+ for(let x=0;x<w;x++){g.fillStyle=`rgba(${Math.random()<.5?'255,255,255':'0,0,0'},${(Math.random()*.08).toFixed(3)})`;g.fillRect(x,0,1,h)}
+ seed(61);for(let i=0;i<500;i++){const x=prng()*w,y=prng()*h,l=rnd(20,200);g.fillStyle=`rgba(255,255,255,${rnd(.02,.07).toFixed(3)})`;g.fillRect(x,y,1,l)}
+ const q=g.createLinearGradient(0,0,w,0);q.addColorStop(0,'rgba(0,0,0,.25)');q.addColorStop(.12,'rgba(0,0,0,0)');q.addColorStop(.88,'rgba(0,0,0,0)');q.addColorStop(1,'rgba(0,0,0,.25)');g.fillStyle=q;g.fillRect(0,0,w,h);
+ g.strokeStyle='#4b4f50';g.lineWidth=4;g.strokeRect(2,2,w-4,h-4);g.strokeStyle='rgba(255,255,255,.35)';g.lineWidth=1;g.strokeRect(6,6,w-12,h-12);
+ g.fillStyle='#111';g.beginPath();g.roundRect?g.roundRect(20,68,300,104,8):g.rect(20,68,300,104);g.fill();g.strokeStyle='#777b7c';g.lineWidth=2;g.stroke();
+ for(let r=0;r<7;r++)for(let c=0;c<11;c++){g.fillStyle='#1b1c1c';g.beginPath();g.arc(100+c*14,420+r*14,3.2,0,7);g.fill();g.fillStyle='rgba(255,255,255,.25)';g.beginPath();g.arc(100.8+c*14,421+r*14,1,0,7);g.fill()}
+ g.fillStyle='#3a3d3e';g.font='bold 17px "Noto Sans TC",sans-serif';g.textAlign='center';g.fillText('對講機  INTERCOM',w/2,544);g.fillStyle='rgba(255,255,255,.4)';g.fillText('對講機  INTERCOM',w/2+1,545);
+ [[22,26],[w-22,26],[22,h-26],[w-22,h-26],[22,h/2],[w-22,h/2]].forEach(p=>{const s=g.createRadialGradient(p[0]-2,p[1]-2,1,p[0],p[1],9);s.addColorStop(0,'#eceeee');s.addColorStop(1,'#5d6162');g.fillStyle=s;g.beginPath();g.arc(p[0],p[1],8,0,7);g.fill();g.strokeStyle='#333';g.lineWidth=2;g.beginPath();g.moveTo(p[0]-5,p[1]-3);g.lineTo(p[0]+5,p[1]+3);g.stroke()});
+ seed(62);blotch(g,w,h,40,'60,55,45',.06,.16,8,26,600,1240);seed(63);scratches(g,w,h,120,'255,255,255',.35,50);seed(64);scratches(g,w,h,60,'20,20,20',.3,30)});
+const plate=face(.34,1.35,.03,pc.t);plate.material.forEach(m=>{m.metalness=.75;m.roughness=.38});plate.material[4].roughnessMap=SMP.r;plate.position.set(.68,1.475,-1.585);sc.add(plate);tag(plate,{h:'plate',g:'panel'});
+const dp=cv(192,56,()=>{});function drawDisp(t,on){const g=dp.g;g.shadowBlur=0;g.fillStyle='#0a0303';g.fillRect(0,0,192,56);g.fillStyle='rgba(255,40,30,.06)';for(let y=2;y<56;y+=4)for(let x=2;x<192;x+=4)g.fillRect(x,y,2,2);
+ g.font='bold 36px "DotGothic16",ui-monospace,monospace';g.textAlign='center';g.textBaseline='middle';if(on){g.shadowColor='#ff2a1a';g.shadowBlur=10}g.fillStyle=on?'#ff3b2f':'#3d1210';g.fillText(t,96,30);g.shadowBlur=0;
+ g.fillStyle='rgba(0,0,0,.28)';for(let y=0;y<56;y+=3)g.fillRect(0,y,192,1);dp.t.needsUpdate=true}
+const disp=ed(new T.Mesh(new T.PlaneGeometry(.27,.08),SM({color:0,emissive:0xffffff,emissiveMap:dp.t,emissiveIntensity:1.6,roughness:.25})));disp.position.set(.68,2.03,-1.568);sc.add(disp);tag(disp,{h:'scr',g:'scr'});
+const BT=[];
+const bezM=SM({color:0xdfe3e5,metalness:.95,roughness:.22,envMapIntensity:1.3});
+// 按鈕面圖：淺灰霧面＋藍色數字＋使用磨損
+function capTex(draw,bg){return cv(96,96,(g,w,h)=>{const r=g.createRadialGradient(40,36,4,48,48,48);r.addColorStop(0,bg||'#f2f3f0');r.addColorStop(.85,'#c5c8c4');r.addColorStop(1,'#8f9390');g.fillStyle=r;g.fillRect(0,0,w,h);draw(g,w,h);
+ const s=g.createRadialGradient(48,52,2,48,52,26);s.addColorStop(0,'rgba(70,60,45,.22)');s.addColorStop(1,'rgba(70,60,45,0)');g.fillStyle=s;g.fillRect(0,0,w,h)}).t}
+function btnMesh(r,map){const geo=new T.CylinderGeometry(r,r*1.06,.016,32);geo.rotateX(Math.PI/2);const m=new T.Mesh(geo,bezM);m.castShadow=m.receiveShadow=true;
+ const fm=SM({color:0x6d7a88,metalness:.4,roughness:.35,emissive:0x000000});const ring=new T.Mesh(new T.RingGeometry(r*.71,r*.83,32),fm);ring.position.z=.0082;m.add(ring);
+ const cap=new T.Mesh(new T.CircleGeometry(r*.72,32),SM({map,roughness:.45,metalness:.1}));cap.position.z=.0085;m.add(cap);m.add(outlineOf(m,.0025));return{m,fm}}
+function btn(x,y,d){const l=capTex(g=>{g.fillStyle='#1e3d96';g.font='bold 48px "Noto Sans TC",Arial,sans-serif';g.textAlign='center';g.textBaseline='middle';g.fillText(d,48,51)});
+ const {m,fm}=btnMesh(.036,l);m.position.set(x,y,-1.57);sc.add(m);tag(m,{h:'btn',g:'panel',d,p:0,fm});BT.push(m);return m}
+const rows=[1.52,1.38,1.24,1.10,.96];let stuckBtn;
+rows.forEach((y,r)=>{btn(.61,y,[1,3,5,7,9][r]);const b=btn(.75,y,[2,4,6,8,0][r]);if(r==4){stuckBtn=b;b.userData.stuck=true}});
+// 裝飾按鍵（不可點）：紅色電話、黃色警鈴、開門／關門
+{const ph=capTex(g=>{g.strokeStyle='#c8231d';g.lineWidth=11;g.lineCap='round';g.beginPath();g.arc(48,60,24,Math.PI*1.12,Math.PI*1.88);g.stroke();g.fillStyle='#c8231d';g.fillRect(20,52,16,12);g.fillRect(60,52,16,12)}),
+  bl=capTex(g=>{g.fillStyle='#e9c21c';g.beginPath();g.moveTo(48,22);g.quadraticCurveTo(70,24,70,56);g.lineTo(76,66);g.lineTo(20,66);g.lineTo(26,56);g.quadraticCurveTo(26,24,48,22);g.fill();g.beginPath();g.arc(48,72,6,0,7);g.fill()}),
+  op=capTex(g=>{g.fillStyle='#1e3d96';g.beginPath();g.moveTo(16,48);g.lineTo(38,32);g.lineTo(38,64);g.fill();g.beginPath();g.moveTo(80,48);g.lineTo(58,32);g.lineTo(58,64);g.fill();g.fillRect(46,30,4,36)}),
+  cl=capTex(g=>{g.fillStyle='#1e3d96';g.beginPath();g.moveTo(44,48);g.lineTo(22,32);g.lineTo(22,64);g.fill();g.beginPath();g.moveTo(52,48);g.lineTo(74,32);g.lineTo(74,64);g.fill()});
+ [[ph,.61,1.86,.034],[bl,.75,1.86,.034],[op,.61,.85,.027],[cl,.75,.85,.027]].forEach(a=>{const {m}=btnMesh(a[3],a[0]);m.position.set(a[1],a[2],-1.57);sc.add(m)})}
+hit(.22,.14,.05,.68,1.68,-1.56,{h:'mic',g:'panel'});
+const hole=new T.Mesh(new T.CircleGeometry(.039,28),SM({color:0x050505,roughness:1}));hole.position.set(.75,.96,-1.568);sc.add(hole);
+// 皺紙團：白紙＋血點，頂點隨機擠壓成皺巴巴的球
+const pbT=cv(128,128,(g,w,h)=>{g.fillStyle='#ecebe5';g.fillRect(0,0,w,h);for(let i=0;i<300;i++){g.fillStyle=`rgba(0,0,0,${(Math.random()*.06).toFixed(3)})`;g.fillRect(Math.random()*w,Math.random()*h,2,2)}g.fillStyle='rgba(140,8,14,.85)';[[30,34,14],[84,70,20],[52,104,9],[100,22,7]].forEach(a=>{g.beginPath();g.arc(a[0],a[1],a[2],0,7);g.fill()});g.fillStyle='rgba(140,8,14,.5)';[[44,44,22],[90,84,26]].forEach(a=>{g.beginPath();g.arc(a[0],a[1],a[2],0,7);g.fill()})}).t;
+const ball=(()=>{const ge=new T.IcosahedronGeometry(.04,2),p=ge.attributes.position;for(let i=0;i<p.count;i++){const v=new T.Vector3().fromBufferAttribute(p,i),k=1+Math.sin(v.x*190)*.08+Math.cos(v.y*230+v.z*120)*.08+(Math.random()-.5)*.12;v.multiplyScalar(k);p.setXYZ(i,v.x,v.y,v.z)}ge.computeVertexNormals();return new T.Mesh(ge,SM({map:pbT,flatShading:true,roughness:.95}))})();ball.position.set(.75,.96,-1.545);ball.castShadow=true;sc.add(ball);
+tag(ball,{h:'paper',g:'panel',f:()=>S.pried&&!S.paper});
+// ───────── 電梯門與門框 ─────────
+// 【CONTRACT】dL/dR(左右門板,h:door)：主迴圈依 S.exit 在 x 方向滑開（±.42），被 dClip 平面裁切（只在門洞內可見）；white/whiteMat 是門外亮面。
+// 【VISUAL】jm 門框金屬、bevMesh() 斜角框、AO 縫條皆可換；但請保持門洞 x∈[-.55,.25]，否則裁切平面 dClip 要一起改。
+const whiteMat=SM({color:0,emissive:0x222222,roughness:1}),white=new T.Mesh(new T.PlaneGeometry(.8,2.2),whiteMat);white.position.set(-.15,1.1,-1.592);sc.add(white);
+const back3=new T.Mesh(new T.PlaneGeometry(40,40),SM({color:0,roughness:1}));back3.position.set(0,1.5,-5);sc.add(back3);
+R.localClippingEnabled=true;
+const dClip=[new T.Plane(new T.Vector3(1,0,0),.55),new T.Plane(new T.Vector3(-1,0,0),.25)];
+function bevGeo(w,h,d,bv){const sh=new T.Shape(),a=w/2-bv,b=h/2-bv;sh.moveTo(-a,-b);sh.lineTo(a,-b);sh.lineTo(a,b);sh.lineTo(-a,b);sh.closePath();const g=new T.ExtrudeGeometry(sh,{depth:d,bevelEnabled:true,bevelThickness:bv,bevelSize:bv,bevelSegments:2,curveSegments:1});g.translate(0,0,-d/2);return g}
+const jm=steelMat(1);jm.color.set(0xd2d6d8);jm.roughness=.3;jm.envMapIntensity=1.1;
+const bevMesh=(w,h,d,bv,m,x,y,z)=>{const o=new T.Mesh(bevGeo(w,h,d,bv),m);o.position.set(x,y,z);o.castShadow=o.receiveShadow=true;o.add(outlineOf(o,.005));sc.add(o);return o};
+bevMesh(.09,2.3,.03,.006,jm,-.595,1.15,-1.585);bevMesh(.09,2.3,.03,.006,jm,.295,1.15,-1.585);bevMesh(.98,.1,.03,.006,jm,-.15,2.25,-1.585);
+{const sl=new T.Mesh(new T.BoxGeometry(.8,.014,.08),jm);sl.position.set(-.15,.007,-1.56);sl.receiveShadow=true;sl.add(outlineOf(sl,.004));sc.add(sl)}
+// 門板：霧面舊不鏽鋼（降低反射，避免中央門板死白）
+const dm=steelMat(1.2);dm.color.set(0xb6bbbd);dm.roughness=.44;dm.envMapIntensity=.85;dm.clippingPlanes=dClip;
+const dL=new T.Mesh(bevGeo(.392,2.19,.02,.004),dm),dR=new T.Mesh(bevGeo(.392,2.19,.02,.004),dm);
+dL.position.set(-.35,1.1,-1.595);dR.position.set(.05,1.1,-1.595);dL.receiveShadow=dR.receiveShadow=true;[dL,dR].forEach(d=>{const h=outlineOf(d,.005);h.material.clippingPlanes=dClip;d.add(h)});sc.add(dL,dR);tag(dL,{h:'door'});tag(dR,{h:'door'});
+const aoH=cv(64,8,(g,w,h)=>{const q=g.createLinearGradient(0,0,w,0);q.addColorStop(0,'rgba(0,0,0,0)');q.addColorStop(.5,'rgba(0,0,0,.6)');q.addColorStop(1,'rgba(0,0,0,0)');g.fillStyle=q;g.fillRect(0,0,w,h)}).t;
+const aoV=cv(8,64,(g,w,h)=>{const q=g.createLinearGradient(0,0,0,h);q.addColorStop(0,'rgba(0,0,0,.55)');q.addColorStop(1,'rgba(0,0,0,0)');g.fillStyle=q;g.fillRect(0,0,w,h)}).t;
+const aoMat=(t,clip)=>SM({map:t,color:0,transparent:true,depthWrite:false,roughness:1,clippingPlanes:clip?dClip:null});
+const aoStrip=(par,x,w)=>{const m=new T.Mesh(new T.PlaneGeometry(w,2.19),aoMat(aoH,1));m.position.set(x,0,.015);par.add(m)};
+aoStrip(dL,.196,.05);aoStrip(dR,-.196,.05);aoStrip(dL,-.196,.07);aoStrip(dR,.196,.07);
+{const m=new T.Mesh(new T.PlaneGeometry(.8,.1),aoMat(aoV,0));m.position.set(-.15,2.15,-1.576);sc.add(m)}
+// 門板下緣的鞋踢污痕
+{const kt=cv(128,64,(g,w,h)=>{seed(71);for(let i=0;i<26;i++){const x=prng()*w,y=rnd(h*.4,h);g.strokeStyle=`rgba(20,18,15,${rnd(.15,.45).toFixed(2)})`;g.lineWidth=rnd(1,3);g.beginPath();g.moveTo(x,y);g.quadraticCurveTo(x+rnd(-10,10),y-rnd(2,8),x+rnd(-18,18),y-rnd(0,4));g.stroke()}}).t;
+ [dL,dR].forEach(d=>{const m=new T.Mesh(new T.PlaneGeometry(.39,.22),SM({map:kt,transparent:true,depthWrite:false,roughness:1,clippingPlanes:dClip}));m.position.set(0,-.98,.0115);d.add(m)})}
+// ───────── 維修暗門 + 密碼機 + 真紙條 ─────────
+// 【CONTRACT】md(鉸鏈群組，主迴圈轉 rotation.y 開門)｜mdb(門板,h:mdoor,g:mdoor)｜machM(密碼機顯示面)+mach 貼圖+drawMach()｜mach 隱形盒(h:mach)｜nt(真紙條模型)+note 隱形盒(h:note)
+// 【VISUAL】門板材質、黑色門洞 box、密碼機貼圖可換；鉸鏈位置 (.51,.46,-1.585) 若改，mdb 的偏移要同步。
+// 維修暗門後方真的往牆內凹的暗箱（深 13cm）
+{const ht=cv(128,192,(g,w,h)=>{g.fillStyle='#141515';g.fillRect(0,0,w,h);g.strokeStyle='#262828';g.lineWidth=3;for(let i=0;i<5;i++){g.beginPath();g.moveTo(10+i*24,0);g.bezierCurveTo(30+i*20,60,i*26,120,20+i*22,h);g.stroke()}for(let i=0;i<500;i++){g.fillStyle=`rgba(255,255,255,${(Math.random()*.05).toFixed(3)})`;g.fillRect(Math.random()*w,Math.random()*h,1,1)}}).t;
+ const cav=new T.Mesh(new T.BoxGeometry(.34,.5,.13),SM({map:ht,roughness:1,side:T.BackSide}));cav.position.set(.68,.46,-1.665);cav.receiveShadow=true;sc.add(cav)}
+// 密碼機面板貼圖：左側黑條（指示燈＋刷卡槽）緊貼四格字母窗，下方四個加大的圖案環
+const mach=cv(256,248,()=>{});let ledM=null;
+function drawMach(){const g=mach.g,W=256,Hh=248,pw=S&&S.pow;
+ g.fillStyle='#e4e2da';g.fillRect(0,0,W,Hh);for(let i=0;i<1200;i++){g.fillStyle=`rgba(${Math.random()<.5?'0,0,0':'255,255,255'},.05)`;g.fillRect(Math.random()*W,Math.random()*Hh,2,2)}
+ const q=g.createLinearGradient(0,Hh*.6,0,Hh);q.addColorStop(0,'rgba(60,50,30,0)');q.addColorStop(1,'rgba(60,50,30,.22)');g.fillStyle=q;g.fillRect(0,0,W,Hh);
+ g.strokeStyle='#1a1a1a';g.lineWidth=5;g.strokeRect(3,3,W-6,Hh-6);
+ g.fillStyle='#2a2c2d';g.fillRect(6,6,38,Hh-12);g.fillStyle='#3c3f40';g.fillRect(6,6,38,3);
+ g.fillStyle=pw?'#5fd35a':'#4a4d4e';g.beginPath();g.arc(25,26,6,0,7);g.fill();
+ g.fillStyle='#050505';g.fillRect(21,48,8,150);g.fillStyle='rgba(255,255,255,.15)';g.fillRect(29,48,1,150);
+ g.save();g.translate(25,222);g.fillStyle='#9a9d9e';g.font='bold 10px monospace';g.textAlign='center';g.fillText('CARD',0,0);g.restore();
+ const dn=S&&S.mdone;for(let i=0;i<4;i++){const x=54+i*48;g.fillStyle='#111';g.fillRect(x-2,20,42,100);g.fillStyle=dn?'#bff0b4':pw?'#fffbd0':'#c9c7be';g.fillRect(x+2,24,34,92);g.fillStyle='rgba(255,255,255,.35)';g.fillRect(x+2,24,34,7);if(dn){g.fillStyle='#1f5a18';g.font='bold 40px monospace';g.textAlign='center';g.textBaseline='middle';g.fillText('OPEN'[i],x+19,72)}}
+ const C=i=>73+i*48,cy=176;
+ for(let i=0;i<4;i++){g.strokeStyle='#8f918d';g.lineWidth=7;g.beginPath();g.arc(C(i),cy,24,0,7);g.stroke();g.fillStyle='#d5d3cb';g.beginPath();g.arc(C(i),cy,20,0,7);g.fill()}
+ if(pw){const ic=(i,f)=>{g.save();g.translate(C(i),cy);g.scale(1.45,1.45);f();g.restore()},P=(c,pts)=>{g.fillStyle=c;g.beginPath();pts.forEach((p,k)=>k?g.lineTo(p[0],p[1]):g.moveTo(p[0],p[1]));g.closePath();g.fill()};
+  ic(0,()=>P('#ff69b4',[[-11,-5],[11,-5],[11,5],[-11,5]]));
+  ic(1,()=>P('#d2691e',[[0,-11],[3,-4],[10,-5],[6,1],[10,7],[2,5],[0,11],[-3,5],[-10,7],[-6,1],[-10,-5],[-3,-4]]));
+  ic(2,()=>{g.fillStyle='#8f55ff';g.beginPath();g.moveTo(0,10);g.bezierCurveTo(-16,-2,-8,-12,0,-5);g.bezierCurveTo(8,-12,16,-2,0,10);g.fill()});
+  ic(3,()=>P('#7bd63c',[[-11,-4],[2,-4],[2,-9],[11,0],[2,9],[2,4],[-11,4]]))}
+ mach.t.needsUpdate=true;if(ledM)ledM.emissive.set(pw?0x3cff3c:0x000000)}
+// 密碼機本體：有厚度的烤漆金屬機箱＋刷卡槽框＋指示燈＋字母窗玻璃＋金屬圖案環（machM 為正面貼圖面）
+const machBT=cv(128,128,(g,w,h)=>{g.fillStyle='#b9bbb5';g.fillRect(0,0,w,h);for(let i=0;i<700;i++){g.fillStyle=`rgba(${Math.random()<.5?'0,0,0':'255,255,255'},.06)`;g.fillRect(Math.random()*w,Math.random()*h,2,1)}seed(141);scratches(g,w,h,30,'255,255,255',.4,30);blotch(g,w,h,8,'60,50,30',.08,.2,10,40)}).t;
+{const bm=SM({map:machBT,roughness:.55,metalness:.35});const body=ed(new T.Mesh(new T.BoxGeometry(.31,.30,.08),bm));body.position.set(.68,.5,-1.66);sc.add(body);
+ const lip=SM({color:0x3a3d3e,metalness:.7,roughness:.4});[[.33,.012,0,.156],[.33,.012,0,-.156],[.012,.32,-.159,0],[.012,.32,.159,0]].forEach(a=>{const m=new T.Mesh(new T.BoxGeometry(a[0],a[1],.012),lip);m.position.set(.68+a[2],.5+a[3],-1.617);m.castShadow=true;sc.add(m)});
+ const X=px=>.68+(px/256-.5)*.31,Y=py=>.5+(.5-py/248)*.30;
+ const sb=new T.Mesh(new T.BoxGeometry(.026,.17,.01),SM({color:0x1c1d1e,metalness:.6,roughness:.4}));sb.position.set(X(25),Y(123),-1.615);sc.add(sb);
+ const si=new T.Mesh(new T.BoxGeometry(.008,.15,.012),SM({color:0x000000,roughness:1}));si.position.set(X(25),Y(123),-1.614);sc.add(si);
+ ledM=SM({color:0x1a2a1a,emissive:0x000000,emissiveIntensity:2,roughness:.2});const led=new T.Mesh(new T.CylinderGeometry(.008,.008,.006,16),ledM);led.rotation.x=Math.PI/2;led.position.set(X(25),Y(26),-1.616);sc.add(led);
+ const rm=SM({color:0xa9adae,metalness:.9,roughness:.3});const gm=SM({color:0xffffff,transparent:true,opacity:.14,roughness:.05,metalness:.3});
+ for(let i=0;i<4;i++){const r=new T.Mesh(new T.TorusGeometry(.0292,.0045,8,32),rm);r.position.set(X(73+i*48),Y(176),-1.6185);sc.add(r);
+  const gl=new T.Mesh(new T.PlaneGeometry(.042,.111),gm);gl.position.set(X(73+i*48),Y(70),-1.6188);sc.add(gl)}}
+const machM=new T.Mesh(new T.PlaneGeometry(.31,.30),SM({map:mach.t,emissive:0xffffff,emissiveMap:mach.t,emissiveIntensity:.18,roughness:.6}));machM.position.set(.68,.5,-1.6195);machM.receiveShadow=true;sc.add(machM);
+hit(.32,.31,.05,.68,.5,-1.6,{h:'mach',g:'mdoor',f:()=>S.open&&!S.mclosed});
+const md=new T.Group();md.position.set(.51,.46,-1.585);sc.add(md);
+// 暗門門板正面：舊不鏽鋼＋「維修專用」貼紙＋鎖孔圈＋手垢
+const mdT=cv(272,400,(g,w,h)=>{g.fillStyle='#a3a7a8';g.fillRect(0,0,w,h);for(let x=0;x<w;x++){g.fillStyle=`rgba(${Math.random()<.5?'255,255,255':'0,0,0'},${(Math.random()*.07).toFixed(3)})`;g.fillRect(x,0,1,h)}
+ g.strokeStyle='#4b4f50';g.lineWidth=5;g.strokeRect(3,3,w-6,h-6);
+ g.save();g.translate(w/2-10,74);g.rotate(-.03);g.fillStyle='#f2efe6';g.fillRect(-92,-34,184,68);g.fillStyle='#c62820';g.fillRect(-92,-34,184,26);g.fillStyle='#fff';g.font='bold 20px "Noto Sans TC",sans-serif';g.textAlign='center';g.fillText('維 修 專 用',0,-14);g.fillStyle='#222';g.font='13px "Noto Sans TC",sans-serif';g.fillText('非工作人員請勿開啟',0,16);g.fillStyle='rgba(120,100,60,.25)';g.fillRect(40,-34,52,68);g.restore();
+ const kx=w/2+80,ky=h/2;const s=g.createRadialGradient(kx-4,ky-4,2,kx,ky,22);s.addColorStop(0,'#e5e7e7');s.addColorStop(1,'#575b5c');g.fillStyle=s;g.beginPath();g.arc(kx,ky,20,0,7);g.fill();
+ seed(81);scratches(g,w,h,40,'255,255,255',.4,30,ky-50,ky+50);seed(82);blotch(g,w,h,10,'50,45,35',.08,.2,10,30,ky-60,ky+60);seed(83);scratches(g,w,h,60,'255,255,255',.25,40)});
+const mdb=box(.34,.5,.03,(()=>{const s=steelMat(2);return [s,s,s,s,SM({map:mdT.t,metalness:.8,roughness:.4,roughnessMap:SMP.r}),s]})(),.17,0,0,md);tag(mdb,{h:'mdoor',g:'mdoor',f:()=>!S.open||S.mclosed});
+{const k=new T.Mesh(new T.CircleGeometry(.015,12),SM({color:0x111111,roughness:.6}));k.position.set(.27,0,.0155);md.add(k)}
+// ───────── 道具/物件模型函式（【VISUAL】主要換模型處）─────────
+// makeKey(kind)、paperNote(bloody)、makeCard()、railModel()、posterModel()：同時用於「場景內擺放」「道具 3D 檢視器」與「道具欄縮圖」（見 MODEL 表）。
+const PH=(c,s)=>SM({color:c,metalness:(s&&s<50)?.1:.9,roughness:(s&&s<50)?.55:.3,flatShading:true});
+function rrect(s,x,y,w,h,r){s.moveTo(x+r,y);s.lineTo(x+w-r,y);s.quadraticCurveTo(x+w,y,x+w,y+r);s.lineTo(x+w,y+h-r);s.quadraticCurveTo(x+w,y+h,x+w-r,y+h);s.lineTo(x+r,y+h);s.quadraticCurveTo(x,y+h,x,y+h-r);s.lineTo(x,y+r);s.quadraticCurveTo(x,y,x+r,y);return s}
+const ext=(s,d,bv)=>{const g=new T.ExtrudeGeometry(s,{depth:d,bevelEnabled:!!bv,bevelThickness:bv||0,bevelSize:bv||0,bevelSegments:2,curveSegments:10});g.translate(0,0,-d/2);return g};
+// 平板鑰匙（參考圖九）：長方圓角頭＋橢圓孔＋凹槽齒
+function flatKey(col){const g=new T.Group(),m=SM({color:col,metalness:.88,roughness:.34,roughnessMap:SMP.r,bumpMap:SMP.b,bumpScale:.002,envMapIntensity:1.2}),P=(geo,x,y,z)=>{const o=ed(new T.Mesh(geo,m));o.position.set(x,y,z);g.add(o);return o};
+ const hs=rrect(new T.Shape(),-.1,-.12,.2,.24,.045),hl=new T.Path();hl.absellipse(.045,0,.026,.075,0,Math.PI*2,true);hs.holes.push(hl);P(ext(hs,.018,.004),-.22,0,0);
+ const bs=new T.Shape();[[-.13,-.04],[.29,-.04],[.33,-.012],[.33,.012],[.3,.03],[.275,.03],[.262,.046],[.248,.03],[.222,.03],[.208,.05],[.194,.03],[.166,.03],[.152,.044],[.138,.03],[.02,.03],[-.01,.058],[-.13,.058]].forEach((p,i)=>i?bs.lineTo(p[0],p[1]):bs.moveTo(p[0],p[1]));P(ext(bs,.014,.002),0,0,0);
+ const gr=new T.Mesh(new T.BoxGeometry(.3,.006,.004),SM({color:0x222222,roughness:.6}));gr.position.set(.15,-.004,.008);g.add(gr);
+ const rc=new T.Mesh(new T.BoxGeometry(.045,.12,.004),m);rc.position.set(-.265,0,.012);g.add(rc);
+ for(let i=0;i<9;i++){const l=new T.Mesh(new T.BoxGeometry(.003,.2,.002),SM({color:0x000000,transparent:true,opacity:.18}));l.position.set(-.305+i*.006,0,.0115);g.add(l)}
+ return g}
+// 車門鑰匙（參考圖一）：黑色遙控器（LOCK / UNLOCK / 紅色 PANIC）＋鑰匙片＋鑰匙圈＋鱷魚紋皮吊牌＋兩把家門鑰匙
+function makeKey(t){if(t=='brass')return flatKey(0xb89443);
+ const g=new T.Group(),blk=SM({color:0x0b0b0c,roughness:.62,metalness:.05,bumpMap:SMP.b,bumpScale:.0015,envMapIntensity:.35}),P=(geo,mm,x,y,z)=>{const o=ed(new T.Mesh(geo,mm));o.position.set(x,y,z);g.add(o);return o};
+ const fs=new T.Shape();fs.moveTo(-.1,-.15);fs.quadraticCurveTo(0,-.19,.1,-.15);fs.quadraticCurveTo(.14,-.02,.11,.12);fs.quadraticCurveTo(.0,.18,-.11,.12);fs.quadraticCurveTo(-.14,-.02,-.1,-.15);
+ const lh=new T.Path();lh.absellipse(0,.118,.024,.014,0,Math.PI*2,true);fs.holes.push(lh);P(ext(fs,.05,.014),blk,0,0,0);
+ const dec=cv(256,320,(c,w,h)=>{c.clearRect(0,0,w,h);c.fillStyle='rgba(225,225,225,.85)';c.font='bold 22px Arial,sans-serif';c.textAlign='center';c.save();c.translate(64,128);c.rotate(-Math.PI/2);c.fillText('LOCK',0,0);c.restore();c.save();c.translate(64,214);c.rotate(-Math.PI/2);c.fillText('UNLOCK',0,0);c.restore();c.fillStyle='#3a3a3a';c.beginPath();c.arc(200,48,7,0,7);c.fill()}).t;
+ const dp2=new T.Mesh(new T.PlaneGeometry(.2,.25),SM({map:dec,transparent:true,depthWrite:false,roughness:.6}));dp2.position.set(0,0,.04);g.add(dp2);
+ const bb=SM({color:0x0c0c0d,roughness:.7});P(new T.BoxGeometry(.06,.055,.014),bb,-.01,.045,.04);P(new T.BoxGeometry(.06,.055,.014),bb,-.01,-.05,.04);
+ const pn=cv(96,64,(c,w,h)=>{c.fillStyle='#d23026';c.fillRect(0,0,w,h);c.fillStyle='#fff';c.font='bold 20px Arial';c.textAlign='center';c.textBaseline='middle';c.fillText('PANIC',w/2,h/2+1)}).t;
+ const pm=face(.06,.045,.014,pn,0xb8261e);pm.position.set(.06,0,.04);g.add(pm);
+ const sv=SM({color:0xcfd3d6,metalness:.92,roughness:.28,roughnessMap:SMP.r,envMapIntensity:1.2});
+ const bl=new T.Group();bl.position.set(0,-.155,0);bl.rotation.z=Math.PI;g.add(bl);{const co=ed(new T.Mesh(new T.CylinderGeometry(.03,.034,.03,16),sv));co.position.y=.02;bl.add(co)}
+ const bm=ed(new T.Mesh(new T.BoxGeometry(.045,.38,.012),sv));bm.position.y=.19;bl.add(bm);const gv=new T.Mesh(new T.BoxGeometry(.01,.34,.003),SM({color:0x555a5e,metalness:.8,roughness:.4}));gv.position.set(0,.19,.0065);bl.add(gv);
+ const rg=new T.Mesh(new T.TorusGeometry(.075,.008,8,32),sv);rg.position.set(0,.19,0);rg.rotation.y=.5;g.add(rg);
+ const cr=cv(128,160,(c,w,h)=>{c.fillStyle='#4a2414';c.fillRect(0,0,w,h);for(let y=0;y<h;y+=14)for(let x=(y/14%2)*9;x<w;x+=18){c.fillStyle='#3a1a0d';c.beginPath();c.ellipse(x,y,8,6,0,0,7);c.fill();c.fillStyle='rgba(150,80,50,.35)';c.beginPath();c.ellipse(x-2,y-2,5,3,0,0,7);c.fill()}c.strokeStyle='rgba(230,200,160,.5)';c.setLineDash([4,3]);c.lineWidth=2;c.strokeRect(8,8,w-16,h-16)}).t;
+ const ts=new T.Shape();ts.moveTo(-.07,.09);ts.lineTo(.07,.09);ts.lineTo(.08,-.04);ts.quadraticCurveTo(0,-.13,-.08,-.04);ts.lineTo(-.07,.09);
+ const tg=new T.Mesh(ext(ts,.012,.003),[SM({map:cr,roughness:.75}),SM({color:0x2a140a,roughness:.8})]);tg.geometry.computeBoundingBox();
+ {const uv=tg.geometry.attributes.uv,p=tg.geometry.attributes.position;for(let i=0;i<uv.count;i++)uv.setXY(i,(p.getX(i)+.08)/.16,(p.getY(i)+.13)/.22)}
+ tg.position.set(.13,.33,-.01);tg.rotation.z=-.6;tg.add(outlineOf(tg,.003));g.add(tg);
+ const k1=flatKey(0xc19a48);k1.scale.setScalar(.42);k1.position.set(.02,.36,.01);k1.rotation.z=Math.PI/2-.3;g.add(k1);
+ const k2=flatKey(0xa6aaad);k2.scale.setScalar(.42);k2.position.set(-.03,.36,-.012);k2.rotation.z=Math.PI/2+.35;g.add(k2);
+ return g}
+// 紙條：real＝泛黃對折紙；fake＝皺巴巴白紙＋左上噴濺血跡、往下流的血痕（參考圖八）。數字內容不可改（解謎用）
+function paperNote(bad){const f=cv(512,384,(g,w,h)=>{g.fillStyle=bad?'#f1f0eb':'#efe6cd';g.fillRect(0,0,w,h);for(let i=0;i<2500;i++){g.fillStyle=`rgba(${bad?'0,0,0':'90,70,30'},${(Math.random()*.05).toFixed(3)})`;g.fillRect(Math.random()*w,Math.random()*h,2,1)}
+  if(!bad){const q=g.createLinearGradient(w/2-14,0,w/2+14,0);q.addColorStop(0,'rgba(0,0,0,0)');q.addColorStop(.48,'rgba(80,60,30,.18)');q.addColorStop(.52,'rgba(255,255,255,.4)');q.addColorStop(1,'rgba(0,0,0,0)');g.fillStyle=q;g.fillRect(w/2-14,0,28,h);
+   const v=g.createRadialGradient(w/2,h/2,h*.3,w/2,h/2,w*.62);v.addColorStop(0,'rgba(0,0,0,0)');v.addColorStop(1,'rgba(150,110,40,.3)');g.fillStyle=v;g.fillRect(0,0,w,h);g.strokeStyle='rgba(60,60,120,.18)';g.lineWidth=1;for(let y=60;y<h;y+=34){g.beginPath();g.moveTo(20,y);g.lineTo(w-20,y);g.stroke()}}
+  g.save();g.translate(w/2,h/2+(bad?18:6));g.rotate(bad?-.04:.02);g.fillStyle=bad?'#1a1210':'#1b1d4a';g.font=(bad?'italic 96px':'italic 84px')+' "Segoe Script","Bradley Hand","Comic Sans MS",cursive';g.textAlign='center';g.textBaseline='middle';g.fillText(bad?'786913':'364712',0,0);g.restore();
+  if(bad){seed(91);for(let i=0;i<260;i++){const x=Math.pow(prng(),1.6)*w*.75,y=Math.pow(prng(),2.2)*h*.45,r=rnd(1,x<120&&y<60?14:5);g.fillStyle=`rgba(${120+prng()*40|0},6,12,${rnd(.55,.95).toFixed(2)})`;g.beginPath();g.arc(x,y,r,0,7);g.fill()}
+   const q=g.createLinearGradient(0,0,0,70);q.addColorStop(0,'rgba(130,6,12,.95)');q.addColorStop(1,'rgba(130,6,12,0)');g.fillStyle=q;g.fillRect(0,0,w*.55,70);
+   seed(92);for(let i=0;i<11;i++){const x=rnd(10,w*.62),l=rnd(40,h*.75),wd=rnd(3,8);g.fillStyle='rgba(125,6,12,.92)';g.fillRect(x-wd/2,0,wd,l);g.beginPath();g.ellipse(x,l,wd*.9,wd*1.3,0,0,7);g.fill()}}
+  seed(93);for(let i=0;i<6;i++){g.strokeStyle='rgba(0,0,0,.06)';g.lineWidth=2;g.beginPath();g.moveTo(prng()*w,prng()*h);g.lineTo(prng()*w,prng()*h);g.stroke()}}),
+ b=cv(512,384,(g,w,h)=>{g.fillStyle=bad?'#e3e1da':'#e6dcc2';g.fillRect(0,0,w,h);if(bad){g.fillStyle='rgba(150,30,30,.3)';g.fillRect(w*.4,0,w*.6,60);[[w*.8,40,50],[w*.6,90,30]].forEach(a=>{g.beginPath();g.arc(a[0],a[1],a[2],0,7);g.fill()})}});
+ let geo;if(bad){geo=new T.PlaneGeometry(.52,.39,26,20);const p=geo.attributes.position;seed(94);const fo=[...Array(6)].map(()=>[rnd(-1,1),rnd(-1,1),rnd(0,6.3),rnd(18,40)]);for(let i=0;i<p.count;i++){const x=p.getX(i),y=p.getY(i);let z=0;fo.forEach(q=>{z+=Math.abs(Math.sin((x*q[0]+y*q[1])*q[3]+q[2]))*.007});p.setZ(i,z-.02+(Math.random()-.5)*.004)}geo.computeVertexNormals()}
+ else{geo=new T.PlaneGeometry(.52,.39,2,1);geo.attributes.position.setZ(1,.012);geo.attributes.position.setZ(4,.012);geo.computeVertexNormals()}
+ const fr=new T.Mesh(geo,SM({map:f.t,roughness:.93,metalness:0})),bk=new T.Mesh(geo,SM({map:b.t,roughness:.93,metalness:0,side:T.BackSide})),g=new T.Group();if(!bad)fr.add(new T.LineSegments(new T.EdgesGeometry(geo,30),LM));g.add(fr,bk);g.userData.float=1;return g}
+// 老警衛大頭照（canvas 手繪）
+function oldMan(g,x,y,w,h){g.save();g.beginPath();g.rect(x,y,w,h);g.clip();const bg=g.createLinearGradient(0,y,0,y+h);bg.addColorStop(0,'#b7c3cc');bg.addColorStop(1,'#8a98a3');g.fillStyle=bg;g.fillRect(x,y,w,h);
+ const cx=x+w/2,cy=y+h*.42;g.fillStyle='#23314e';g.beginPath();g.moveTo(x-6,y+h);g.quadraticCurveTo(cx,y+h*.6,x+w+6,y+h);g.fill();
+ g.fillStyle='#e9e9e4';g.beginPath();g.moveTo(cx-18,y+h*.74);g.lineTo(cx,y+h*.86);g.lineTo(cx+18,y+h*.74);g.lineTo(cx,y+h*.78);g.fill();
+ g.fillStyle='#b98a6b';g.fillRect(cx-12,cy+h*.16,24,h*.16);
+ g.fillStyle='#c99a7a';g.beginPath();g.ellipse(cx-w*.27,cy+4,6,11,0,0,7);g.fill();g.beginPath();g.ellipse(cx+w*.27,cy+4,6,11,0,0,7);g.fill();
+ g.fillStyle='#d3a688';g.beginPath();g.ellipse(cx,cy,w*.27,h*.25,0,0,7);g.fill();
+ g.fillStyle='#c4c4bf';g.beginPath();g.ellipse(cx-w*.24,cy-h*.07,9,18,.3,0,7);g.fill();g.beginPath();g.ellipse(cx+w*.24,cy-h*.07,9,18,-.3,0,7);g.fill();g.fillStyle='rgba(200,200,195,.6)';g.beginPath();g.ellipse(cx,cy-h*.22,w*.18,6,0,0,7);g.fill();
+ g.strokeStyle='#9c6f55';g.lineWidth=1.3;[-.16,-.12].forEach(o=>{g.beginPath();g.moveTo(cx-16,cy+h*o);g.quadraticCurveTo(cx,cy+h*o-3,cx+16,cy+h*o);g.stroke()});
+ g.fillStyle='#bdbdb8';g.fillRect(cx-22,cy-9,16,4);g.fillRect(cx+6,cy-9,16,4);g.fillStyle='#2a2420';g.beginPath();g.arc(cx-13,cy-1,2.4,0,7);g.fill();g.beginPath();g.arc(cx+13,cy-1,2.4,0,7);g.fill();
+ g.strokeStyle='#8f6249';g.beginPath();g.moveTo(cx-19,cy+5);g.quadraticCurveTo(cx-13,cy+8,cx-7,cy+5);g.moveTo(cx+7,cy+5);g.quadraticCurveTo(cx+13,cy+8,cx+19,cy+5);g.moveTo(cx-1,cy+2);g.lineTo(cx-4,cy+15);g.lineTo(cx+3,cy+16);g.moveTo(cx-14,cy+14);g.quadraticCurveTo(cx-12,cy+24,cx-8,cy+28);g.moveTo(cx+14,cy+14);g.quadraticCurveTo(cx+12,cy+24,cx+8,cy+28);g.stroke();
+ g.strokeStyle='#6d3f30';g.lineWidth=2;g.beginPath();g.moveTo(cx-9,cy+27);g.quadraticCurveTo(cx,cy+24,cx+9,cy+27);g.stroke();
+ g.strokeStyle='rgba(40,40,40,.7)';g.lineWidth=1.4;g.strokeRect(cx-23,cy-6,18,11);g.strokeRect(cx+5,cy-6,18,11);g.beginPath();g.moveTo(cx-5,cy-1);g.lineTo(cx+5,cy-1);g.stroke();
+ for(let i=0;i<900;i++){g.fillStyle=`rgba(${Math.random()<.5?'255,255,255':'0,0,0'},.06)`;g.fillRect(x+Math.random()*w,y+Math.random()*h,1,1)}g.fillStyle='rgba(255,240,210,.08)';g.fillRect(x,y,w,h);g.restore()}
+// 警衛證（參考圖七）：透明 PVC 卡套＋夾子＋證件（黃禹文／電梯日常維護、小區安全巡邏）＋血跡
+function makeCard(){const FN2='"Noto Sans TC","PingFang TC","Microsoft JhengHei",sans-serif';
+ const f=cv(512,320,(g,w,h)=>{g.fillStyle='#f4f5f3';g.fillRect(0,0,w,h);g.fillStyle='#17305f';g.fillRect(0,0,w,64);g.fillStyle='#fff';g.font='bold 28px '+FN2;g.textBaseline='middle';g.fillText('小區保安',22,33);g.textAlign='right';g.fillStyle='rgba(255,255,255,.5)';g.font='bold 34px '+FN2;g.fillText('工作證',w-20,34);g.textAlign='left';
+  g.fillStyle='#17305f';g.fillRect(0,h-26,w,26);g.fillStyle='rgba(255,255,255,.85)';g.font='12px '+FN2;g.fillText('此工作證僅供本人使用，妥善保管，遺失請立即申報補發。',22,h-13);
+  g.strokeStyle='#3a3f45';g.lineWidth=2;g.strokeRect(24,82,122,158);oldMan(g,25,83,120,156);
+  g.fillStyle='#1b1b1b';g.font='21px '+FN2;g.fillText('姓　名：黃禹文',168,104);g.fillText('職　務：電梯日常維護',168,146);g.fillText('　　　　小區安全巡邏',168,178);g.fillText('編　號：0364',168,220);
+  g.strokeStyle='rgba(23,48,95,.25)';g.lineWidth=1;[118,160,192,234].forEach(y=>{g.beginPath();g.moveTo(240,y);g.lineTo(w-24,y);g.stroke()});
+  seed(101);for(let i=0;i<70;i++){const x=rnd(w*.72,w),y=rnd(h*.68,h-26),r=rnd(1,i<6?14:4);g.fillStyle=`rgba(${120+prng()*30|0},8,12,${rnd(.6,.9).toFixed(2)})`;g.beginPath();g.arc(x,y,r,0,7);g.fill()}
+  g.fillStyle='rgba(110,8,12,.35)';g.beginPath();g.ellipse(w*.87,h*.8,44,14,-.4,0,7);g.fill();for(let i=0;i<600;i++){g.fillStyle='rgba(80,70,50,.05)';g.fillRect(Math.random()*w,Math.random()*h,2,2)}}),
+  b=cv(512,320,(g,w,h)=>{g.fillStyle='#e6e8e6';g.fillRect(0,0,w,h);g.fillStyle='#555';g.font='bold 20px '+FN2;g.fillText('注意事項',24,42);g.font='15px '+FN2;['一、執勤時應配戴本證。','二、本證不得轉借他人使用。','三、離職時應繳回本證。'].forEach((t,i)=>g.fillText(t,24,82+i*30));g.fillStyle='rgba(120,10,14,.3)';g.beginPath();g.arc(w*.25,h*.75,30,0,7);g.fill()});
+ const g=new T.Group(),s=mat(0xe9ebe8),cd=new T.Mesh(new T.BoxGeometry(.8,.5,.006),[s,s,s,s,SM({map:f.t,roughness:.6}),SM({map:b.t,roughness:.7})]);cd.castShadow=true;cd.add(new T.LineSegments(new T.EdgesGeometry(cd.geometry),new T.LineBasicMaterial({color:0x6c7277})));g.add(cd);
+ const pv=SM({color:0xeaf3f6,roughness:.06,metalness:0,transparent:true,opacity:.2,depthWrite:false,envMapIntensity:1.6}),lm=new T.LineBasicMaterial({color:0xa9b6bc,transparent:true,opacity:.75});
+ const sl=new T.Mesh(new T.BoxGeometry(.88,.6,.02),pv);sl.position.y=.03;sl.add(new T.LineSegments(new T.EdgesGeometry(sl.geometry),lm));g.add(sl);
+ [-.36,.36].forEach(x=>{const h=new T.Mesh(new T.TorusGeometry(.018,.004,6,16),SM({color:0xc8d2d6,transparent:true,opacity:.6}));h.position.set(x,.29,.011);g.add(h)});
+ const tb=new T.Mesh(new T.BoxGeometry(.13,.08,.016),pv);tb.position.set(0,.37,0);tb.add(new T.LineSegments(new T.EdgesGeometry(tb.geometry),lm));g.add(tb);
+ const st=new T.Mesh(new T.BoxGeometry(.06,.2,.004),SM({color:0xdfe7ea,transparent:true,opacity:.5,roughness:.1}));st.position.set(0,.47,.006);g.add(st);
+ const cm2=SM({color:0xd4d8da,metalness:.92,roughness:.25,envMapIntensity:1.3});const cl=ed(new T.Mesh(new T.BoxGeometry(.1,.07,.025),cm2));cl.position.set(0,.6,.006);g.add(cl);
+ const sn=new T.Mesh(new T.CylinderGeometry(.018,.018,.012,16),cm2);sn.rotation.x=Math.PI/2;sn.position.set(0,.47,.012);g.add(sn);
+ return g}
+// 扶手：拉絲不鏽鋼圓管＋圓形壁座（參考圖十一）
+function railModel(){const g=new T.Group(),m=SM({color:0xd5d9db,metalness:.95,roughness:.3,roughnessMap:SMP.r,bumpMap:SMP.b,bumpScale:.0015,envMapIntensity:1.15}),b=ed(new T.Mesh(new T.CylinderGeometry(.02,.02,2.2,20),m));b.rotation.z=Math.PI/2;g.add(b);
+ [-1.1,1.1].forEach(x=>{const e=new T.Mesh(new T.SphereGeometry(.02,12,8),m);e.position.x=x;g.add(e)});
+ [-.8,.8].forEach(x=>{const k=ed(new T.Mesh(new T.CylinderGeometry(.011,.011,.055,10),m));k.rotation.x=Math.PI/2;k.position.set(x,0,-.032);g.add(k);const r=ed(new T.Mesh(new T.CylinderGeometry(.032,.032,.01,20),m));r.rotation.x=Math.PI/2;r.position.set(x,0,-.06);g.add(r)});return g}
+// 海報正面（參考圖五）：黃色「設備停止使用」告示，做舊、膠帶、摺痕
+const po=cv(700,1000,(g,w,h)=>{const FN2='"Noto Sans TC","PingFang TC","Microsoft JhengHei",sans-serif';g.fillStyle='#efbd24';g.fillRect(0,0,w,h);for(let i=0;i<5000;i++){g.fillStyle=`rgba(${Math.random()<.5?'255,255,255':'120,80,0'},.05)`;g.fillRect(Math.random()*w,Math.random()*h,2,2)}
+ const cx=350,cy=300;g.lineCap='round';g.lineJoin='round';g.strokeStyle='#e01f2b';g.lineWidth=36;g.beginPath();g.arc(cx,cy,225,0,7);g.stroke();g.beginPath();g.moveTo(cx-160,cy-160);g.lineTo(cx+160,cy+160);g.stroke();
+ g.strokeStyle='#141414';g.fillStyle='#141414';g.lineWidth=14;
+ g.beginPath();g.roundRect?g.roundRect(140,250,150,150,18):g.rect(140,250,150,150);g.stroke();[[178,0],[215,1],[252,0]].forEach(a=>{g.beginPath();g.arc(a[0],292,10,0,7);g.fill();if(a[1]){g.beginPath();g.moveTo(a[0],304);g.lineTo(a[0]-14,350);g.lineTo(a[0]+14,350);g.fill()}else g.fillRect(a[0]-9,304,18,46);g.fillRect(a[0]-8,350,6,30);g.fillRect(a[0]+2,350,6,30)});
+ [[215,225,-1],[215,425,1]].forEach(a=>{g.beginPath();g.moveTo(a[0]-28,a[1]);g.lineTo(a[0]+28,a[1]);g.lineTo(a[0],a[1]+a[2]*26);g.fill()});
+ g.lineWidth=18;g.beginPath();g.moveTo(330,140);g.lineTo(420,140);g.lineTo(560,250);g.quadraticCurveTo(590,270,560,290);g.lineTo(540,290);g.lineTo(410,190);g.lineTo(330,190);g.quadraticCurveTo(300,165,330,140);g.stroke();g.fillRect(452,92,22,44);g.beginPath();g.arc(463,80,11,0,7);g.fill();
+ g.lineWidth=13;g.strokeRect(380,345,145,130);g.beginPath();g.arc(452,450,42,Math.PI,0);g.stroke();g.beginPath();g.arc(432,445,8,0,7);g.fill();g.beginPath();g.arc(472,445,8,0,7);g.fill();g.fillStyle='#d8261d';g.beginPath();g.arc(437,358,8,0,7);g.fill();g.fillStyle='#2a9a3c';g.beginPath();g.arc(468,358,8,0,7);g.fill();g.fillStyle='#141414';
+ [[452,330,-1],[452,490,1]].forEach(a=>{g.beginPath();g.moveTo(a[0]-26,a[1]);g.lineTo(a[0]+26,a[1]);g.lineTo(a[0],a[1]+a[2]*24);g.fill()});
+ g.textAlign='center';g.textBaseline='alphabetic';g.fillStyle='#1a1a1a';g.font='bold 36px '+FN2;g.fillText('建築物 □ 昇降設備 □ 機械停車設備',w/2,600);
+ g.font='900 96px '+FN2;g.lineJoin='round';g.strokeStyle='#fff';g.lineWidth=16;g.strokeText('設備停止使用',w/2,712);g.fillStyle='#e0172b';g.fillText('設備停止使用',w/2,712);
+ g.textAlign='left';g.fillStyle='#1a1a1a';g.font='19px '+FN2;['一、本昇降設備經定期檢查，結果不符合規定，','　　依規定暫停使用並廢止其使用許可。','二、經檢查不合格，依規定張貼停止使用之標示。','三、停止使用設備許可證編號：＿＿＿＿＿＿'].forEach((t,i)=>g.fillText(t,70,770+i*30));
+ g.textAlign='center';g.fillStyle='#d9161f';g.font='bold 22px '+FN2;g.fillText('本告示不得擅自撕毀或遮蔽，違者依法究辦。',w/2,905);
+ g.fillStyle='#1f4a9c';g.fillRect(0,925,w,75);g.fillStyle='#fff';g.textAlign='left';g.font='bold 34px '+FN2;g.fillText('管理委員會　提醒您',30,975);g.font='16px '+FN2;g.fillText('中華民國 ■■■ 年 ■■ 月 ■■ 日',440,958);g.fillText('洽詢：管理室',440,984);
+ const v=g.createRadialGradient(w/2,h/2,h*.32,w/2,h/2,h*.75);v.addColorStop(0,'rgba(0,0,0,0)');v.addColorStop(1,'rgba(110,70,10,.45)');g.fillStyle=v;g.fillRect(0,0,w,h);
+ seed(111);blotch(g,w,h,10,'130,90,20',.06,.16,40,140);[[w*.5,0,w*.5,h],[0,h*.48,w,h*.52]].forEach(l=>{g.strokeStyle='rgba(90,60,10,.22)';g.lineWidth=3;g.beginPath();g.moveTo(l[0],l[1]);g.lineTo(l[2],l[3]);g.stroke();g.strokeStyle='rgba(255,255,230,.25)';g.lineWidth=1;g.beginPath();g.moveTo(l[0]+3,l[1]+3);g.lineTo(l[2]+3,l[3]+3);g.stroke()});
+ [[0,0,.7],[w,0,-.7],[0,h,-.7],[w,h,.7]].forEach(c=>{g.save();g.translate(c[0],c[1]);g.rotate(c[2]);g.fillStyle='rgba(225,215,170,.6)';g.fillRect(-55,-16,110,32);g.restore()});
+ g.fillStyle='rgba(255,255,255,.06)';g.fillRect(0,0,w,h)});
+// 海報背面（參考圖六）：蠟筆塗鴉圖形＋字母＋「+3」與血跡。【CONTRACT-謎題】圖形與字母對應不可改（粉長方 L、棕星 M、紫心 B、綠箭頭 K → +3 ＝ OPEN）
+const puz=cv(700,1000,(g,w,h)=>{g.fillStyle='#fbfaf6';g.fillRect(0,0,w,h);for(let i=0;i<3000;i++){g.fillStyle='rgba(0,0,0,.03)';g.fillRect(Math.random()*w,Math.random()*h,2,2)}
+ seed(121);const path=(p)=>{g.beginPath();p.forEach((q,i)=>i?g.lineTo(q[0],q[1]):g.moveTo(q[0],q[1]));g.closePath()};
+ const crayon=(mk,col)=>{g.save();mk();g.clip();g.strokeStyle=col;g.lineCap='round';for(let i=-80;i<80;i++){g.globalAlpha=rnd(.35,.7);g.lineWidth=rnd(4,8);g.beginPath();const x=i*10+rnd(-3,3);g.moveTo(x,0);g.lineTo(x+h*.55,h);g.stroke()}g.restore();g.globalAlpha=1;g.strokeStyle='#151515';g.lineJoin='round';for(let k=0;k<2;k++){g.lineWidth=k?3:5;g.save();g.translate(rnd(-2,2),rnd(-2,2));mk();g.stroke();g.restore()}};
+ const L=(t,x,y,s,r)=>{g.save();g.translate(x,y);g.rotate(r||0);g.fillStyle='#151515';g.font=`${s}px "Comic Sans MS","Chalkboard SE","Marker Felt",cursive`;g.textAlign='center';g.textBaseline='middle';g.fillText(t,0,0);g.restore()};
+ crayon(()=>path([[70,110],[310,110],[310,225],[70,225]]),'#f06fb5');L('L',190,168,74);
+ crayon(()=>path([[455,70],[530,180],[455,295],[380,180]]),'#f5cf3d');L('D',455,184,74);
+ crayon(()=>{g.beginPath();g.arc(305,375,95,0,7)},'#6f7ff0');L('C',305,378,74);
+ const st=[];for(let i=0;i<12;i++){const a=i*Math.PI/6-Math.PI/2,r=i%2?60:118;st.push([150+Math.cos(a)*r,560+Math.sin(a)*r])}crayon(()=>path(st),'#b5622a');L('M',150,565,64);
+ crayon(()=>path([[455,450],[525,450],[525,520],[595,520],[595,590],[525,590],[525,660],[455,660],[455,590],[385,590],[385,520],[455,520]]),'#ea4646');L('X',490,555,70,.3);
+ crayon(()=>path([[330,640],[410,800],[250,800]]),'#2f9be8');L('T',330,745,64);
+ crayon(()=>path([[70,830],[165,830],[150,770],[290,880],[160,955],[170,900],[80,920]]),'#82d65a');L('K',168,868,66,.45);
+ crayon(()=>{g.beginPath();g.moveTo(520,960);g.bezierCurveTo(390,880,410,760,505,795);g.bezierCurveTo(600,740,650,860,520,960);g.closePath()},'#9a5ad8');L('B',520,860,70,.2);
+ L('ALL',600,150,40);L('+3',600,240,104);
+ const bx=600,by=360;for(let i=0;i<180;i++){const a=prng()*6.3,d=Math.pow(prng(),1.8)*170,r=rnd(1,d<30?18:6);g.fillStyle=`rgba(${150+prng()*40|0},6,12,${rnd(.6,.95).toFixed(2)})`;g.beginPath();g.arc(bx+Math.cos(a)*d,by+Math.sin(a)*d*.7,r,0,7);g.fill()}
+ for(let i=0;i<24;i++){const a=prng()*6.3,d=rnd(40,190);g.strokeStyle='rgba(160,8,14,.9)';g.lineWidth=rnd(1,3);g.beginPath();g.moveTo(bx,by);g.lineTo(bx+Math.cos(a)*d,by+Math.sin(a)*d*.7);g.stroke()}});
+function posterModel(){const geo=new T.PlaneGeometry(.7,1,8,12),p=geo.attributes.position;for(let i=0;i<p.count;i++){const x=p.getX(i),y=p.getY(i);p.setZ(i,Math.sin(x*4.2+1)*.008+Math.cos(y*3)*.006)}geo.computeVertexNormals();
+ const g=new T.Group(),fr=new T.Mesh(geo,SM({map:po.t,roughness:.88})),bk=new T.Mesh((()=>{const g2=geo.clone(),uv=g2.attributes.uv;for(let i=0;i<uv.count;i++)uv.setX(i,1-uv.getX(i));return g2})(),SM({map:puz.t,roughness:.9,side:T.BackSide}));fr.add(new T.LineSegments(new T.EdgesGeometry(geo,40),LM));g.add(fr,bk);g.userData.float=1;return g}
+// ───────── 海報 ─────────
+// 【CONTRACT】post(海報面,h:poster,g:poster)｜pg(群組：主迴圈做歪斜/掉落動畫)｜ghost(撕後牆面痕跡)｜pc 隱形盒 k=1(左上)/k=2(右上)：兩角都撕起 → evPoster
+const ghT=cv(146,206,(g,w,h)=>{g.fillStyle='#9a9c8e';g.fillRect(0,0,w,h);for(let i=0;i<1500;i++){g.fillStyle=`rgba(0,0,0,${(Math.random()*.06).toFixed(3)})`;g.fillRect(Math.random()*w,Math.random()*h,1,1)}g.strokeStyle='rgba(60,58,48,.35)';g.lineWidth=2;g.strokeRect(2,2,w-4,h-4);
+ [[0,0,.7],[w,0,-.7],[0,h,-.7],[w,h,.7]].forEach(c=>{g.save();g.translate(c[0],c[1]);g.rotate(c[2]);g.fillStyle='rgba(200,185,130,.55)';g.fillRect(-14,-5,28,10);g.restore()})}).t;
+const ghost=new T.Mesh(new T.PlaneGeometry(.73,1.03),SM({map:ghT,roughness:.95}));ghost.visible=false;   // 撕下後牆面不留任何痕跡（保留變數以免引用出錯）
+const pg=new T.Group();pg.position.set(.4,1.4,1.595);sc.add(pg);
+const post=ed(new T.Mesh(new T.PlaneGeometry(.7,1),SM({map:po.t,roughness:.85})));post.rotation.y=Math.PI;pg.add(post);tag(post,{h:'poster',g:'poster',f:()=>!S.pdone});
+hit(.16,.16,.03,.1,1.84,1.575,{h:'pc',g:'poster',k:1,f:()=>!S.pdone&&!S.p1});hit(.16,.16,.03,.7,1.84,1.575,{h:'pc',g:'poster',k:2,f:()=>!S.pdone&&!S.p2});
+// ───────── 扶手 ─────────
+// 【CONTRACT】rail(左,可被撕下並飛離)｜rr(右,裝飾)｜隱形盒 h:rail（f: !S.rail）。窄化後牆面在 x=±.85，扶手貼牆位置 x=±.79
+const rail=railModel();rail.rotation.y=Math.PI/2;sc.add(rail);const rr=railModel();rr.rotation.y=-Math.PI/2;rr.position.set(.79,.95,0);sc.add(rr);
+hit(.25,.25,2.2,-.78,.95,0,{h:'rail',f:()=>!S.rail});hit(.24,.14,2.26,-.55,.05,-.4,{h:'railf',f:()=>S.rail&&!S.rail2});
+// ───────── 紅地毯 + 可掀角 + 小鑰匙（參考圖二）─────────
+// 【CONTRACT】flapM(可掀角網格，由 peel(p) 逐頂點重算；p＝flapP 0~1)｜flapH(黑描邊)｜blob(接觸陰影)｜flap 隱形盒(h:flap)｜key(小鑰匙,h:key,f:S.lift&&flapP>.8)
+// 【VISUAL】地毯：酒紅密織纖維貼圖 carpetMaps()；背面：深色橡膠防滑點 rubberTex。地毯改為離牆 8cm 的獨立地墊，掀角位於左後牆角。
+function carpetMaps(){const N=1024,cc=cnv(N),bc=cnv(N),g=cc.getContext('2d'),b=bc.getContext('2d'),im=g.createImageData(N,N),ib=b.createImageData(N,N),d=im.data,e=ib.data;
+ for(let y=0;y<N;y++)for(let x=0;x<N;x++){const i=y*N+x,wv=(((x>>1)+(y>>1))&1)?1.07:.93,k=(.84+Math.random()*.32)*wv,h=(.5+(Math.random()-.5)*.34)*wv*255;d[i*4]=112*k;d[i*4+1]=20*k;d[i*4+2]=28*k;d[i*4+3]=255;e[i*4]=e[i*4+1]=e[i*4+2]=h;e[i*4+3]=255}
+ g.putImageData(im,0,0);b.putImageData(ib,0,0);g.lineCap=b.lineCap='round';
+ for(let i=0;i<42000;i++){const x=Math.random()*N,y=Math.random()*N,an=(Math.random()<.5?.78:-.78)+(Math.random()-.5)*.9,l=2+Math.random()*6,k=.5+Math.random()*1.05,hv=Math.min(255,128*k*1.1)|0,ex=x+Math.cos(an)*l,ey=y+Math.sin(an)*l;
+  g.strokeStyle=`rgba(${Math.min(255,118*k)|0},${22*k|0},${30*k|0},.6)`;g.lineWidth=.8+Math.random()*.9;g.beginPath();g.moveTo(x,y);g.lineTo(ex,ey);g.stroke();
+  b.strokeStyle=`rgba(${hv},${hv},${hv},.6)`;b.lineWidth=g.lineWidth;b.beginPath();b.moveTo(x,y);b.lineTo(ex,ey);b.stroke()}
+ seed(131);blotch(g,N,N,18,'30,6,8',.06,.16,40,200);seed(132);for(let i=0;i<400;i++){g.fillStyle=`rgba(${prng()<.5?'20,16,12':'170,160,140'},${rnd(.2,.5).toFixed(2)})`;g.fillRect(prng()*N,prng()*N,rnd(1,3),rnd(1,3))}
+ return{m:mkT(cc,1),b:mkT(bc)}}
+const CPM=carpetMaps();
+const carpetMat=rep=>{const m=CPM.m.clone(),b=CPM.b.clone();[m,b].forEach(t=>{t.needsUpdate=true;t.repeat.set(rep,rep)});return SM({map:m,bumpMap:b,bumpScale:.005,roughness:.97,metalness:0,envMapIntensity:.2})};
+{const s=new T.Shape();[[.03,-1.52],[.77,-1.52],[.77,1.4],[-.77,1.4],[-.77,-.72],[.03,-.72]].forEach((p,i)=>i?s.lineTo(p[0],p[1]):s.moveTo(p[0],p[1]));
+ const c=new T.Mesh(new T.ExtrudeGeometry(s,{depth:.014,bevelEnabled:false}),[carpetMat(.9),SM({color:0x4a1014,roughness:1})]);c.rotation.x=-Math.PI/2;c.position.y=0;c.receiveShadow=true;sc.add(c)}
+// 掀開的背面：深色橡膠＋防滑凸點（絕不是白紙）
+const rubberTex=(()=>{const N=256,cc=cnv(N),bc=cnv(N),g=cc.getContext('2d'),b=bc.getContext('2d'),im=g.createImageData(N,N),ib=b.createImageData(N,N),d=im.data,e=ib.data;
+ for(let i=0;i<N*N;i++){const k=.8+Math.random()*.4,h=90+Math.random()*50;d[i*4]=40*k;d[i*4+1]=36*k;d[i*4+2]=33*k;d[i*4+3]=255;e[i*4]=e[i*4+1]=e[i*4+2]=h;e[i*4+3]=255}
+ g.putImageData(im,0,0);b.putImageData(ib,0,0);
+ for(let y=4;y<N;y+=8)for(let x=((y/8)%2)*4+4;x<N;x+=8){g.fillStyle='rgba(78,72,66,.9)';g.beginPath();g.arc(x,y,2.3,0,7);g.fill();const s=b.createRadialGradient(x,y,0,x,y,2.8);s.addColorStop(0,'#f0f0f0');s.addColorStop(1,'rgba(128,128,128,0)');b.fillStyle=s;b.beginPath();b.arc(x,y,2.8,0,7);b.fill()}
+ for(let i=0;i<40;i++){const x=Math.random()*N,y=Math.random()*N,r=4+Math.random()*16,q=g.createRadialGradient(x,y,0,x,y,r);q.addColorStop(0,'rgba(120,110,95,.18)');q.addColorStop(1,'rgba(120,110,95,0)');g.fillStyle=q;g.fillRect(x-r,y-r,2*r,2*r)}
+ const m=mkT(cc,1),bu=mkT(bc);m.repeat.set(5,5);bu.repeat.set(5,5);return{m,b:bu}})();
+const flapMats=[carpetMat(.72),SM({map:rubberTex.m,bumpMap:rubberTex.b,bumpScale:.008,roughness:1,metalness:0}),
+ SM({map:(()=>{const t=CPM.m.clone();t.needsUpdate=true;t.repeat.set(2,1);return t})(),color:0x9a6a6c,roughness:.97,side:T.DoubleSide})];
+const FN=41,FL=.8,FT=.014,FP=FN*FN,K2=Math.SQRT1_2,GI=(i,j)=>j*FN+i,gx=new Float32Array(FP),gz=new Float32Array(FP);
+for(let j=0;j<FN;j++)for(let i=0;i<FN;i++){gx[GI(i,j)]=-FL/2+FL*i/(FN-1);gz[GI(i,j)]=-FL/2+FL*j/(FN-1)}
+const fEdges=[[],[],[],[]],fOut=[[0,-1],[0,1],[-1,0],[1,0]];for(let k=0;k<FN;k++){fEdges[0].push(GI(k,0));fEdges[1].push(GI(k,FN-1));fEdges[2].push(GI(0,k));fEdges[3].push(GI(FN-1,k))}
+const rvG=[],rvL=[],ruv=[];
+for(let g=0;g<FP;g++){rvG.push(g);rvL.push(1);ruv.push((gx[g]+FL/2)/FL,(gz[g]+FL/2)/FL)}
+for(let g=0;g<FP;g++){rvG.push(g);rvL.push(-1);ruv.push((gx[g]+FL/2)/FL,(gz[g]+FL/2)/FL)}
+const sideStart=rvG.length;fEdges.forEach(E=>{E.forEach((g,k)=>{rvG.push(g);rvL.push(1);ruv.push(k/(FN-1)*1.5,0)});E.forEach((g,k)=>{rvG.push(g);rvL.push(-1);ruv.push(k/(FN-1)*1.5,.12)})});
+function gridTris(off,flip,arr){for(let j=0;j<FN-1;j++)for(let i=0;i<FN-1;i++){const A=off+GI(i,j),B=off+GI(i,j+1),C=off+GI(i+1,j),D=off+GI(i+1,j+1);if(!flip)arr.push(A,B,C,B,D,C);else arr.push(A,C,B,B,C,D)}}
+function sideQ(arr,Tf,Bf,g0,g1,od){const dx=gx[g1]-gx[g0],dz=gz[g1]-gz[g0],ok=(-dz*od[0]+dx*od[1])>0;for(let k=0;k<FN-1;k++){const a=Tf(k),b=Bf(k),c=Tf(k+1),d=Bf(k+1);if(ok)arr.push(a,b,c,b,d,c);else arr.push(a,c,b,b,c,d)}}
+const ridx=[],hidx=[];gridTris(0,0,ridx);const nTop=ridx.length;gridTris(FP,1,ridx);const nBot=ridx.length-nTop;
+fEdges.forEach((E,ei)=>{const tb=sideStart+ei*2*FN,bb=tb+FN;sideQ(ridx,k=>tb+k,k=>bb+k,E[0],E[1],fOut[ei])});const nSide=ridx.length-nTop-nBot;
+gridTris(0,0,hidx);gridTris(FP,1,hidx);fEdges.forEach((E,ei)=>sideQ(hidx,k=>E[k],k=>FP+E[k],E[0],E[1],fOut[ei]));
+const G1=new T.BufferGeometry(),rpos=new T.BufferAttribute(new Float32Array(rvG.length*3),3);rpos.setUsage(T.DynamicDrawUsage);
+G1.setAttribute('position',rpos);G1.setAttribute('uv',new T.BufferAttribute(new Float32Array(ruv),2));G1.setIndex(ridx);G1.addGroup(0,nTop,0);G1.addGroup(nTop,nBot,1);G1.addGroup(nTop+nBot,nSide,2);
+const G2=new T.BufferGeometry(),hpos=new T.BufferAttribute(new Float32Array(FP*2*3),3);hpos.setUsage(T.DynamicDrawUsage);G2.setAttribute('position',hpos);G2.setIndex(hidx);
+const flapM=new T.Mesh(G1,flapMats);flapM.position.set(-.37,.014,1.12);flapM.castShadow=flapM.receiveShadow=true;flapM.frustumCulled=false;sc.add(flapM);
+const hmt=new T.MeshBasicMaterial({color:0,side:T.BackSide}),hu={value:0};hmt.userData.u=hu;hmt.userData.base=.0035;
+hmt.onBeforeCompile=sh=>{sh.uniforms.uT=hu;sh.vertexShader='uniform float uT;\n'+sh.vertexShader.replace('#include <begin_vertex>','vec3 transformed=position+normalize(normal)*uT/length(modelMatrix[0].xyz);')};
+const flapH=new T.Mesh(G2,hmt);flapH.position.copy(flapM.position);flapH.frustumCulled=false;flapH.visible=false;sc.add(flapH);
+// soft contact shadow under the lifted part
+const blobT=cv(64,64,(g,w,h)=>{const r=g.createRadialGradient(32,32,2,32,32,30);r.addColorStop(0,'rgba(0,0,0,.75)');r.addColorStop(1,'rgba(0,0,0,0)');g.fillStyle=r;g.fillRect(0,0,w,h)}).t;
+const blob=new T.Mesh(new T.PlaneGeometry(.75,.5),SM({map:blobT,color:0,transparent:true,opacity:0,depthWrite:false,roughness:1}));blob.rotation.x=-Math.PI/2;
+const blobG=new T.Group();blobG.position.set(-.42,.004,1.17);blobG.rotation.y=-Math.PI/4;blobG.add(blob);sc.add(blobG);
+let flapP=0,flapLast=-1;const fMid=new Float32Array(FP*3),fNrm=new Float32Array(FP*3);
+function peel(p){const e=p*p*(3-2*p),psi=e*Math.PI,sg=e,r=.05-(.05-.0085)*sg,h=FT/2;
+ for(let g=0;g<FP;g++){const x=gx[g],z=gz[g],t=(x-z+.8)*K2,w=(x+z)*K2,ce=.5+.09*w;let u=t,y=0,bn=0;
+  if(psi>1e-4&&t<ce){const ell=ce-t,arc=r*psi;if(ell<=arc){const a=ell/r;u=ce-r*Math.sin(a);y=r*(1-Math.cos(a));bn=a}else{const l2=ell-arc;u=ce-r*Math.sin(psi)-l2*Math.cos(psi);y=r*(1-Math.cos(psi))+l2*Math.sin(psi);bn=psi}}
+  const du=(u-t)*K2,sn=Math.sin(bn);fMid[g*3]=x+du;fMid[g*3+1]=y-h;fMid[g*3+2]=z-du;fNrm[g*3]=sn*K2;fNrm[g*3+1]=Math.cos(bn);fNrm[g*3+2]=-sn*K2}
+ const P=rpos.array;for(let v=0;v<rvG.length;v++){const g=rvG[v],l=rvL[v]*h;P[v*3]=fMid[g*3]+fNrm[g*3]*l;P[v*3+1]=fMid[g*3+1]+fNrm[g*3+1]*l;P[v*3+2]=fMid[g*3+2]+fNrm[g*3+2]*l}
+ const Q=hpos.array;for(let g=0;g<FP;g++)for(let c=0;c<3;c++){Q[g*3+c]=fMid[g*3+c]+fNrm[g*3+c]*h;Q[(FP+g)*3+c]=fMid[g*3+c]-fNrm[g*3+c]*h}
+ rpos.needsUpdate=hpos.needsUpdate=true;G1.computeVertexNormals();G2.computeVertexNormals();
+ hu.value=hmt.userData.base*Math.min(1,p*10);flapH.visible=p>.02;blob.material.opacity=.55*Math.min(1,p*3)}
+peel(0);
+hit(.8,.04,.8,-.37,.03,1.12,{h:'flap'});
+const key=makeKey('brass');key.scale.setScalar(.4);key.rotation.set(-Math.PI/2,0,.6);key.position.set(-.61,.012,1.36);sc.add(key);
+hit(.22,.1,.22,-.61,.05,1.36,{h:'key',f:()=>S.lift&&!S.dkey&&flapP>.8});
+// 警衛證 card：逃生口開啟且 S.drop 時由主迴圈驅動掉落 (cardSt 0→1→2)，落地點 (0,.02,HZ)；隱形盒 h:card
+const card=makeCard();card.scale.setScalar(.32);card.visible=false;sc.add(card);let cardSt=0,cvy=0;
+hit(.3,.06,.2,0,.04,HZ,{h:'card',f:()=>S.drop&&cardSt==2&&!S.card});
+const nt=paperNote(false);nt.scale.setScalar(.34);nt.position.set(.68,.3,-1.582);nt.rotation.z=.06;sc.add(nt);
+hit(.26,.06,.2,.6,.03,-1.28,{h:'note',f:()=>S.open&&!S.real&&ntLand});
+// 【CONTRACT】MODEL：道具 id → 檢視器模型產生函式。新增/換道具模型時，id 要與 IT 的 key 一致。
+const MODEL={key:()=>makeKey('car'),dkey:()=>makeKey('brass'),fake:()=>paperNote(true),real:()=>paperNote(false),card:makeCard,rail:railModel,poster:posterModel};
+// 道具欄縮圖 thumb(id)：用同一個 MODEL 模型拍一張 128px 透明背景照片（快取），讓背包圖示與 3D 模型一致；失敗回傳 '' → 退回 IT 的 SVG
+const THUMB={};let R3,S3,C3;
+function thumb(id){if(id in THUMB)return THUMB[id];THUMB[id]='';try{
+ if(!R3){R3=new T.WebGLRenderer({antialias:true,alpha:true,preserveDrawingBuffer:true});R3.setPixelRatio(1);R3.setSize(128,128);R3.outputEncoding=T.sRGBEncoding;R3.toneMapping=T.ACESFilmicToneMapping;R3.toneMappingExposure=1.05;S3=new T.Scene();try{S3.environment=makeEnv(R3)}catch(e){}C3=new T.PerspectiveCamera(30,1,.1,10);C3.position.z=3.4;S3.add(new T.AmbientLight(0xffffff,.55));const d=new T.DirectionalLight(0xfff4e6,1.5);d.position.set(2,3,3);S3.add(d)}
+ const m=MODEL[id](),b=new T.Box3().setFromObject(m),s=b.getSize(new T.Vector3()),c=b.getCenter(new T.Vector3());m.position.sub(c);const gp=new T.Group();gp.add(m);gp.scale.setScalar(1.75/Math.max(s.x,s.y,s.z));gp.rotation.set(.3,-.4,0);S3.add(gp);
+ m.traverse(o=>{if(o.userData.hull){const u=o.material.userData;u.u.value=u.base*gp.scale.x}});
+ R3.render(S3,C3);S3.remove(gp);const k=document.createElement('canvas');k.width=k.height=32;const kg=k.getContext('2d');kg.drawImage(R3.domElement,0,0,32,32);const px=kg.getImageData(0,0,32,32).data;let a=0;for(let i=3;i<px.length;i+=4)a+=px[i];THUMB[id]=a>2000?R3.domElement.toDataURL('image/png'):''}catch(e){THUMB[id]=''}return THUMB[id]}
+// ═══════ 【VISUAL】音效：全部用 Web Audio 即時合成（不需音檔、不需網路）═══════
+// 觸發方式：主迴圈每幀呼叫 sfxTick(s,t,f)，比對 S 的變化來播放（不改任何劇情邏輯）。
+// 對照：按鈕按下 BT.userData.p==1 → btn｜S.pried → pry｜inv 增加 → pickup｜S.lift → carpet｜燈光閃爍 fS → flicker＋常駐電流聲 hum
+//       S.shk → quake｜S.rail → railBreak｜S.open → mdoor｜S.hat 0→1 / 1→0 → hatchOpen / hatchClose｜S.p1/p2 → tear｜S.pdone → rip
+//       S.pow → swipe｜cardSt 0→1 → 證件飄落、1→2 → 落地。#snd 按鈕切換靜音。瀏覽器規定要先有一次點擊才會出聲。
+const SFX=(()=>{let ac=null,out=null,nb=null,hum=null,on=true;
+ function unlock(){if(ac){if(on&&ac.state=='suspended')ac.resume();return}const A=window.AudioContext||window.webkitAudioContext;if(!A)return;ac=new A();
+  const cp=ac.createDynamicsCompressor();cp.threshold.value=-14;cp.ratio.value=4;out=ac.createGain();out.gain.value=on?.8:0;out.connect(cp);cp.connect(ac.destination);
+  nb=ac.createBuffer(1,ac.sampleRate*2,ac.sampleRate);const d=nb.getChannelData(0);for(let i=0;i<d.length;i++)d[i]=Math.random()*2-1;
+  // 常駐：日光燈電流嗡嗡聲（50/100Hz＋高頻嘶聲）
+  const g=ac.createGain();g.gain.value=0;const lp=ac.createBiquadFilter();lp.type='lowpass';lp.frequency.value=420;
+  [[50,'sawtooth',.5],[100,'square',.18],[150,'sine',.2]].forEach(a=>{const o=ac.createOscillator();o.type=a[1];o.frequency.value=a[0];const og=ac.createGain();og.gain.value=a[2];o.connect(og);og.connect(lp);o.start()});
+  const ns=ac.createBufferSource();ns.buffer=nb;ns.loop=true;const hp=ac.createBiquadFilter();hp.type='bandpass';hp.frequency.value=6000;hp.Q.value=.8;const ng=ac.createGain();ng.gain.value=.05;ns.connect(hp);hp.connect(ng);ng.connect(g);ns.start();
+  lp.connect(g);g.connect(out);hum=g}
+ const T0=()=>ac.currentTime;
+ function env(g,t,a,peak,dec){g.gain.setValueAtTime(0,t);g.gain.linearRampToValueAtTime(peak,t+a);g.gain.exponentialRampToValueAtTime(.0001,t+a+dec)}
+ function tone(f,type,t,dur,v,f2,dst){if(!ac)return;const o=ac.createOscillator(),g=ac.createGain();o.type=type;o.frequency.setValueAtTime(f,t);if(f2)o.frequency.exponentialRampToValueAtTime(f2,t+dur);env(g,t,.004,v,dur);o.connect(g);g.connect(dst||out);o.start(t);o.stop(t+dur+.05)}
+ function noise(t,dur,v,type,fq,Q,fq2,att){if(!ac)return;const s=ac.createBufferSource();s.buffer=nb;const f=ac.createBiquadFilter();f.type=type||'lowpass';f.frequency.setValueAtTime(fq||1000,t);if(fq2)f.frequency.exponentialRampToValueAtTime(fq2,t+dur);f.Q.value=Q||.7;const g=ac.createGain();env(g,t,att||.003,v,dur);s.connect(f);f.connect(g);g.connect(out);s.start(t,Math.random());s.stop(t+dur+.05)}
+ // 金屬共鳴（非諧波）：用於扶手、蓋板、鑰匙
+ function metal(t,base,v,dur){[1,2.76,5.4,8.93].forEach((k,i)=>tone(base*k,'sine',t,dur/(1+i*.6),v/(1+i)))}
+ const P={
+  btn(stuck){const t=T0();if(stuck){tone(140,'sine',t,.09,.35,70);noise(t,.06,.25,'lowpass',700)}else{noise(t,.025,.3,'highpass',3500);tone(2100,'square',t,.025,.06,900);tone(1320,'sine',t+.03,.12,.12)}},
+  pry(){const t=T0();noise(t,.35,.22,'bandpass',1800,6,3600,.08);tone(420,'sawtooth',t,.3,.04,620);noise(t+.36,.05,.5,'highpass',2500);tone(1600,'square',t+.36,.07,.12,300);metal(t+.37,620,.12,.35)},
+  pickup(){const t=T0();tone(660,'triangle',t,.12,.16);tone(990,'triangle',t+.09,.22,.16);tone(1320,'sine',t+.18,.3,.07)},
+  carpet(up){const t=T0();noise(t,.42,.28,'lowpass',up?400:1400,1,up?1600:300,.12);if(!up){tone(85,'sine',t+.36,.18,.35,50);noise(t+.36,.12,.2,'lowpass',300)}},
+  flicker(){const t=T0();for(let i=0;i<5;i++){noise(t+i*.09,.03,.18,'highpass',2500);tone(120,'square',t+i*.09,.04,.05)}},
+  quake(){const t=T0();noise(t,2.4,.7,'lowpass',140,1,60,.08);tone(42,'sine',t,2.3,.6,30);tone(31,'triangle',t+.1,2,.35);
+   for(let i=0;i<9;i++)noise(t+.1+Math.random()*1.6,.05,.22,'highpass',3000);for(let i=0;i<4;i++)metal(t+.2+Math.random()*1.5,180+Math.random()*120,.08,.6);tone(260,'sawtooth',t+.4,.9,.03,140)},
+  railBreak(){const t=T0();noise(t,.06,.6,'highpass',2000);tone(2400,'square',t,.06,.14,380);metal(t+.01,520,.22,.9);
+   [.38,.55,.68].forEach((d,i)=>{metal(t+d,700+i*160,.16/(i+1),.45);noise(t+d,.04,.3/(i+1),'bandpass',2600,3)});tone(90,'sine',t+.38,.2,.3,60)},
+  mdoor(){const t=T0();noise(t,.03,.35,'highpass',3000);tone(1800,'square',t,.03,.07);noise(t+.12,.03,.35,'highpass',3000);tone(1500,'square',t+.12,.03,.07);
+   noise(t+.24,.05,.5,'bandpass',1200,2);tone(300,'square',t+.24,.06,.1,120);
+   const o=ac.createOscillator(),g=ac.createGain(),lf=ac.createOscillator(),lg=ac.createGain(),bp=ac.createBiquadFilter();o.type='sawtooth';o.frequency.setValueAtTime(260,t+.3);o.frequency.linearRampToValueAtTime(520,t+1.0);lf.frequency.value=38;lg.gain.value=60;lf.connect(lg);lg.connect(o.frequency);bp.type='bandpass';bp.frequency.value=900;bp.Q.value=4;g.gain.setValueAtTime(0,t+.3);g.gain.linearRampToValueAtTime(.07,t+.45);g.gain.linearRampToValueAtTime(0,t+1.05);o.connect(bp);bp.connect(g);g.connect(out);o.start(t+.3);lf.start(t+.3);o.stop(t+1.1);lf.stop(t+1.1)},
+  hatchOpen(){const t=T0();tone(95,'sine',t,.25,.45,60);noise(t,.15,.35,'lowpass',500);metal(t+.02,260,.12,.6);noise(t+.45,1.1,.22,'bandpass',900,3,1600,.2);tone(140,'sawtooth',t+.45,1.1,.03,190);metal(t+1.55,330,.1,.5)},
+  hatchClose(){const t=T0();noise(t,1.0,.22,'bandpass',1500,3,800,.15);tone(180,'sawtooth',t,1,.03,120);tone(110,'sine',t+1.05,.25,.5,55);noise(t+1.05,.08,.5,'highpass',1800);metal(t+1.06,240,.16,.7)},
+  tear(big){const t=T0(),n=big?14:6;for(let i=0;i<n;i++)noise(t+i*(big?.04:.03)+Math.random()*.02,.04+Math.random()*.04,.22+Math.random()*.2,'bandpass',2200+Math.random()*2500,1.5);if(big)noise(t,.55,.12,'highpass',3000,.7,1500,.05)},
+  swipe(){const t=T0();noise(t,.28,.3,'bandpass',1400,2,3200,.06);tone(1320,'sine',t+.3,.12,.14);tone(1760,'sine',t+.42,.16,.14)},
+  cardFall(){const t=T0();for(let i=0;i<5;i++)noise(t+i*.12,.1,.08,'bandpass',800+i*120,1.2,null,.04)},
+  crash(){const t=T0();noise(t,2.2,.9,'lowpass',380,1,70,.005);tone(58,'sine',t,1.8,.8,28);tone(90,'triangle',t,.6,.4,40);metal(t+.02,150,.25,1.4);metal(t+.05,233,.18,1.1);for(let i=0;i<10;i++)noise(t+.15+Math.random()*1.2,.04,.18,'highpass',2500)},
+  rumble(v){v=v||.5;const t=T0();noise(t,2,.5*v,'lowpass',160,1,90,.3);tone(40,'sine',t,1.9,.4*v,34)},
+  ding(){const t=T0();tone(1046,'sine',t,1.3,.22);tone(2092,'sine',t,.6,.05);tone(784,'sine',t+.42,1.6,.22);tone(1568,'sine',t+.42,.7,.05)},
+  doorOpen(){const t=T0();tone(110,'sawtooth',t,1.5,.035,170);noise(t,1.5,.14,'bandpass',600,2,900,.2);noise(t+1.45,.08,.25,'lowpass',400);tone(80,'sine',t+1.45,.15,.25,50)},
+  doorClose(){const t=T0();tone(170,'sawtooth',t,1.4,.035,110);noise(t,1.4,.14,'bandpass',900,2,600,.2);tone(70,'sine',t+1.4,.25,.45,40);noise(t+1.4,.1,.35,'lowpass',500);metal(t+1.41,200,.1,.5)},
+  mclose(){const t=T0();const o=ac.createOscillator(),g=ac.createGain(),bp=ac.createBiquadFilter();o.type='sawtooth';o.frequency.setValueAtTime(480,t);o.frequency.linearRampToValueAtTime(250,t+.6);bp.type='bandpass';bp.frequency.value=900;bp.Q.value=4;g.gain.setValueAtTime(0,t);g.gain.linearRampToValueAtTime(.06,t+.1);g.gain.linearRampToValueAtTime(0,t+.65);o.connect(bp);bp.connect(g);g.connect(out);o.start(t);o.stop(t+.7);noise(t+.68,.05,.5,'bandpass',1200,2);tone(260,'square',t+.68,.05,.1,110);noise(t+.85,.03,.3,'highpass',3000)},
+  granted(){const t=T0();noise(t,.03,.3,'highpass',3000);[880,1175,1568].forEach((f,i)=>tone(f,'square',t+.05+i*.11,.1,.07));tone(2093,'sine',t+.4,.5,.12);noise(t+.7,.05,.35,'bandpass',1200,2)},
+  step(){const t=T0(),r=.9+Math.random()*.2;tone(75*r,'sine',t,.1,.28,45);noise(t,.06,.14,'lowpass',500*r)},
+  cardLand(){const t=T0();tone(1700,'triangle',t,.05,.18,900);noise(t,.03,.25,'highpass',2500);tone(1500,'triangle',t+.11,.04,.08,900);noise(t+.11,.02,.1,'highpass',2500)}};
+ const play=(k,a)=>{if(!ac||!on)return;try{P[k](a)}catch(e){}};
+ const toggle=()=>{on=!on;if(ac){out.gain.setTargetAtTime(on?.8:0,ac.currentTime,.05);if(on)ac.resume();else setTimeout(()=>{if(!on)ac.suspend()},120)}return on};
+ const setHum=v=>{if(hum&&on)hum.gain.setTargetAtTime(v,ac.currentTime,.03)};
+ return{unlock,play,toggle,setHum,get on(){return on}}})();
+addEventListener('pointerdown',SFX.unlock,true);addEventListener('keydown',SFX.unlock,true);
+$('snd').onclick=e=>{e.stopPropagation();SFX.unlock();const v=SFX.toggle();$('snd').textContent=v?'音效：開':'音效：關';$('snd').classList.toggle('off',!v)};
+let sfxS=null,sfxP={},sfxInv=null,sfxN=0,sfxFS=-1,sfxCard=0;
+function sfxTick(s,t,f){
+ if(s!==sfxS||inv!==sfxInv){sfxS=s;sfxInv=inv;sfxP=Object.assign({},s);sfxN=inv?inv.length:0;sfxCard=cardSt;sfxFS=fS;return}   // 重新開始：只同步，不出聲
+ const was=k=>!!sfxP[k],now=k=>!!s[k];
+ BT.forEach(m=>{if(m.userData.p===1)SFX.play('btn',m.userData.stuck&&!s.fixed&&!s.pried)});
+ if(now('pried')&&!was('pried'))SFX.play('pry');
+ if(inv.length>sfxN)SFX.play('pickup');sfxN=inv.length;
+ if(now('lift')!=was('lift'))SFX.play('carpet',now('lift'));
+ if(now('shk')&&!was('shk'))SFX.play('quake');
+ if(now('rail')&&!was('rail'))SFX.play('railBreak');
+ if(now('open')&&!was('open'))SFX.play('mdoor');
+ if(now('mclosed')&&!was('mclosed'))SFX.play('mclose');
+ if(now('hat')&&!was('hat'))SFX.play('hatchOpen');else if(!now('hat')&&was('hat'))SFX.play('hatchClose');
+ if((now('p1')&&!was('p1'))||(now('p2')&&!was('p2')))SFX.play('tear',false);
+ if(now('pdone')&&!was('pdone'))SFX.play('tear',true);
+ if(now('pow')&&!was('pow'))SFX.play('swipe');
+ if(cardSt==1&&sfxCard==0)SFX.play('cardFall');if(cardSt==2&&sfxCard==1)SFX.play('cardLand');sfxCard=cardSt;
+ if(now('exit')&&!was('exit'))SFX.play('doorOpen');else if(!now('exit')&&was('exit'))SFX.play('doorClose');
+ if(fS!==sfxFS&&fS>=0){sfxFS=fS;SFX.play('flicker')}
+ SFX.setHum(s.over?0:.012+.03*Math.max(0,1-f)+(s.shk?.03:0));
+ sfxP=Object.assign({},s)}
+// ═══════ 【VISUAL】鏡頭演出 / 結局場景 / 資訊物件 ═══════
+// camFx()：每幀由主迴圈呼叫——走路（walkV 線性速度＋頭部起伏＋腳步聲）、震動（shake()）、頭暈晃動（swayA）、首頁隨機輕晃、room 顯示
+let doorK=.035,walkV=0,roomForce=null,shakeUntil=0,shakeAmp=0,swayA=0,swayCur=0,flkUntil=0,bobPh=0,bobStep=0,ntLand=false,ntT0=0;
+function shake(ms,a){shakeUntil=performance.now()+ms;shakeAmp=a}
+function flicker(ms){flkUntil=performance.now()+ms;SFX.play('flicker')}
+function flkMod(t,f){if(t>=flkUntil)return f;const b=Math.floor(t/85),r=Math.abs(Math.sin(b*12.9898+Math.floor(t/1300)*78.233)*43758.5453)%1;return r<.28?.12:r<.45?.5:r<.55?.8:1}
+function camFx(t,s){const dz=walkZ-cam.position.z;let moving=false;
+ if(walkV>0){const st=Math.min(Math.abs(dz),walkV);cam.position.z+=Math.sign(dz)*st;moving=st>.0005}else cam.position.z+=dz*.025;
+ if(moving){bobPh+=.13;const k=Math.floor(bobPh/Math.PI);if(k!=bobStep){bobStep=k;SFX.play('step')}}
+ if(TITLE&&Math.random()<.0035){shake(650,.006);SFX.play('rumble',.25)}
+ const sh=s.shk?.025:0,ss=t<shakeUntil?shakeAmp:0;
+ cam.position.x=(Math.random()-.5)*2*sh+(Math.sin(t*.031)+Math.sin(t*.053))*.5*ss;cam.position.y=1.4+(moving?Math.abs(Math.sin(bobPh))*.035-.018:0)+(Math.random()-.5)*2*sh+(Math.sin(t*.041)+Math.sin(t*.067))*.5*ss;
+ swayCur+=(swayA-swayCur)*.05;if(swayCur>.0005){cam.rotation.x+=Math.sin(t*.0031)*swayCur;cam.rotation.y+=Math.sin(t*.0023)*swayCur*.8;cam.rotation.z=Math.sin(t*.0017)*swayCur*.6}else cam.rotation.z=0;
+ room.visible=roomForce!=null?roomForce:cam.position.z>-1.5}
+// 暗門打開後，真紙條從暗門裡掉到地毯上（落地後才可點）
+function ntFall(t,s){if(!s.open){ntT0=0;ntLand=false;return}if(s.real)return;if(!ntT0)ntT0=t;const u=Math.max(0,Math.min(1,(t-ntT0-450)/750));
+ nt.position.set(.68-.08*u,.3-.28*u*u,-1.582+.302*u);nt.rotation.set(-Math.PI/2*u,0,.06+.44*u);ntLand=u>=1}
+// 霧：電梯內看不出來；結局走廊遠處逐漸沒入黑暗
+sc.fog=new T.Fog(0x000000,4,11);
+// 結局走廊 corr（平時隱藏）＋電梯外立面（只從外面看得到）
+const corr=new T.Group();corr.visible=false;sc.add(corr);
+{const wm=WSd.clone();wm.color=new T.Color(0x6a6d68);['map','roughnessMap','bumpMap'].forEach(k=>{if(wm[k]){wm[k]=wm[k].clone();wm[k].needsUpdate=true;wm[k].repeat.set(12,1)}});
+ const fm=flo.clone();['map','bumpMap'].forEach(k=>{if(fm[k]){fm[k]=fm[k].clone();fm[k].needsUpdate=true;fm[k].repeat.set(1.4,12)}});
+ const cb=new T.Mesh(new T.BoxGeometry(2.4,2.6,40),[wm,wm,SM({color:0x2a2c2b,roughness:.9,side:T.BackSide}),fm,SM({visible:false}),SM({visible:false})]);cb.position.set(0,1.3,-21.62);corr.add(cb);
+ for(let i=0;i<8;i++){const l=new T.Mesh(new T.BoxGeometry(.5,.03,.18),SM({color:0x3a3c3a,emissive:0x0a0c0b,roughness:.6}));l.position.set(0,2.585,-3.5-i*4.5);corr.add(l)}
+ const fwm=steelMat(1);fwm.color.set(0x8a8e8f);[[.65,2.6,-.875,1.3],[.95,2.6,.725,1.3],[.8,.4,-.15,2.4]].forEach(a=>{const p=new T.Mesh(new T.PlaneGeometry(a[0],a[1]),fwm);p.rotation.y=Math.PI;p.position.set(a[2],a[3],-1.606);sc.add(p)})}
+// BE：走廊遠處那台「孤零零的電梯正面」（假的，左右鏡像；走近時無縫換成真的那台）＋走廊靠電梯端的微光
+const FZ=-14;
+{const fm2=steelMat(1);fm2.color.set(0x8a8e8f);[[.95,2.6,-.725,1.3],[.65,2.6,.875,1.3],[.8,.4,.15,2.4]].forEach(a=>{const p=new T.Mesh(new T.PlaneGeometry(a[0],a[1]),fm2);p.position.set(a[2],a[3],FZ);corr.add(p)});
+ const dm2=steelMat(1.2);dm2.color.set(0xb6bbbd);dm2.roughness=.44;[-.05,.35].forEach(x=>{const d=new T.Mesh(new T.BoxGeometry(.392,2.19,.02),dm2);d.position.set(x,1.1,FZ-.012);corr.add(d)});
+ const ilm=SM({color:0,emissive:0xff2a1a,emissiveIntensity:1.2});const il=new T.Mesh(new T.PlaneGeometry(.12,.04),ilm);il.position.set(.15,2.32,FZ+.002);corr.add(il);
+ const il2=new T.Mesh(new T.PlaneGeometry(.12,.04),ilm);il2.rotation.y=Math.PI;il2.position.set(-.15,2.32,-1.608);corr.add(il2);
+ const fl=new T.PointLight(0xdfe9e4,.5,4,1.5);fl.position.set(.15,1.9,FZ+.7);corr.add(fl);const nl=new T.PointLight(0xdfe9e4,.5,4,1.5);nl.position.set(-.15,1.9,-2.3);corr.add(nl)}
+const outG=new T.Group();outG.visible=false;sc.add(outG);
+{const bl=new T.Mesh(new T.PlaneGeometry(8,4),new T.MeshBasicMaterial({color:0x000000}));bl.rotation.y=Math.PI;bl.position.set(0,4.6,-1.61);outG.add(bl);
+ const il=new T.Mesh(new T.PlaneGeometry(.12,.04),SM({color:0,emissive:0xff2a1a,emissiveIntensity:1.2}));il.rotation.y=Math.PI;il.position.set(-.15,2.32,-1.608);outG.add(il)}
+// 只提供資訊的互動物件（隱形判定盒）：保養紀錄表 / 載重銘牌 / 監視器 / 吸頂燈 / 通風口
+hit(.05,.43,.33,-.83,1.55,-.85,{h:'sheet'});hit(.05,.13,.24,.83,1.92,-1.2,{h:'cap'});hit(.18,.12,.18,-.68,2.55,-1.44,{h:'cctv'});hit(.6,.12,.6,0,2.55,.5,{h:'lamp'});hit(.46,.05,.19,0,2.58,1.28,{h:'vent'});
+function resetFx(){outG.visible=false;doorK=.035;walkV=0;roomForce=null;shakeUntil=0;swayA=swayCur=0;flkUntil=0;ntLand=false;ntT0=0;corr.visible=false;$('sub').className='';nt.position.set(.68,.3,-1.582);nt.rotation.set(0,0,.06)}
+// ---- camera: fixed standing position, smooth look / zoom
+let yaw=0,pit=0,fov=65,tY=0,tP=0,tF=65,drag=null,Z=null,SVw=null,walkZ=0;const pts=new Map(),RC=new T.Raycaster(),cl=(v,a,b)=>Math.max(a,Math.min(b,v));
+const norm=a=>{while(a-yaw>Math.PI)a-=2*Math.PI;while(a-yaw<-Math.PI)a+=2*Math.PI;return a};
+function look(o,f){const p=new T.Vector3();o.getWorldPosition(p);p.sub(cam.position);tY=norm(Math.atan2(-p.x,-p.z));tP=cl(Math.atan2(p.y,Math.hypot(p.x,p.z)),-1.3,1.3);tF=f||40}
+// 【CONTRACT】ZM：zoom 群組表 { 群組名:[鏡頭對準的 mesh, 目標 fov] }；userData.g 用它決定點到物件時要 zoom 去哪。
+const ZM={panel:[plate,52],scr:[disp,24],poster:[post,44],mdoor:[mdb,30]};
+function enterZoom(g){SVw={y:tY,p:tP,f:tF};Z=g;look(ZM[g][0],ZM[g][1]);$('back').style.display='block';$('ctl').style.display='none'}
+function exitZoom(){if(!Z)return;Z=null;closeM();tY=SVw.y;tP=SVw.p;tF=SVw.f;$('back').style.display='none';if(!(S&&S.over))$('ctl').style.display='flex'}
+$('back').onclick=()=>exitZoom();
+function resetView(){Z=null;$('back').style.display='none';$('ctl').style.display='flex';walkZ=0;cam.position.set(0,1.4,0);yaw=pit=0;tY=tP=0;tF=fov=65;cardSt=0;drawDisp('--',0);drawMach();whiteMat.emissive.set(0x222222);whiteMat.emissiveIntensity=1;back3.material.emissive.set(0)}
+function pick(e){const r=cvs.getBoundingClientRect();RC.setFromCamera(new T.Vector2((e.clientX-r.left)/r.width*2-1,-((e.clientY-r.top)/r.height)*2+1),cam);const h=RC.intersectObjects(HOT.filter(m=>!m.userData.f||m.userData.f()),false);return h[0]?h[0].object:null}
+cvs.onpointerdown=e=>{cvs.setPointerCapture(e.pointerId);pts.set(e.pointerId,{x:e.clientX,y:e.clientY});drag={m:0};cvs.style.cursor='grabbing'};
+cvs.onpointermove=e=>{const p=pts.get(e.pointerId);if(!p){cvs.style.cursor=pick(e)?'pointer':'grab';return}
+ if(Z||S.over){drag.m=99;return}
+ if(pts.size==2){const q=[...pts.values()],o=Math.hypot(q[0].x-q[1].x,q[0].y-q[1].y);p.x=e.clientX;p.y=e.clientY;const n=Math.hypot(q[0].x-q[1].x,q[0].y-q[1].y);tF=cl(tF*o/n,28,80);drag.m=99;return}
+ const k=tF*Math.PI/180/cvs.clientHeight,dx=e.clientX-p.x,dy=e.clientY-p.y;p.x=e.clientX;p.y=e.clientY;drag.m+=Math.abs(dx)+Math.abs(dy);tY+=dx*k;tP=cl(tP+dy*k,-1.3,1.3)};
+cvs.onpointerup=e=>{pts.delete(e.pointerId);cvs.style.cursor='grab';
+ if(drag&&drag.m<6&&!pts.size){if(logOpen){drag=null;return}const o=(S&&S.over)||TITLE?null:pick(e);let acted=false;if(o&&$('modal').style.display!='flex'){const h=o.userData.h,g=o.userData.g;if(g){if(!Z){enterZoom(g);acted=true}else if(Z==g&&!busy){H[h](o);acted=true}}else if(!Z&&!busy){if(h=='hatch'){tP=1.1;tF=62}else look(o,40);H[h](o);acted=true}}if(!acted&&(dMode==1||dMode==2))adv()}
+ if(!pts.size)drag=null};
+cvs.onwheel=e=>{e.preventDefault();if(!Z)tF=cl(tF+e.deltaY*.05,28,80)};
+$('ctl').onclick=e=>{const c=e.target.dataset.c;if(!c||Z)return;const k=tF*Math.PI/180*.35;if(c=='l')tY+=k;if(c=='r')tY-=k;if(c=='u')tP=cl(tP+k,-1.3,1.3);if(c=='d')tP=cl(tP-k,-1.3,1.3);if(c=='in')tF=cl(tF-12,28,80);if(c=='out')tF=cl(tF+12,28,80);if(c=='h'){tY=norm(0);tP=0;tF=65}};
+addEventListener('keydown',e=>{const m={ArrowLeft:'l',ArrowRight:'r',ArrowUp:'u',ArrowDown:'d','+':'in','=':'in','-':'out'}[e.key];if(m&&e.target.tagName!='INPUT')$('ctl').onclick({target:{dataset:{c:m}}})});
+new ResizeObserver(()=>{const w=$('scene').clientWidth,h=$('scene').clientHeight;R.setSize(w,h,false);if(comp){comp.setPixelRatio(R.getPixelRatio());comp.setSize(w,h)}cam.aspect=w/h;cam.updateProjectionMatrix()}).observe($('scene'));
+// ---- item viewer: drag to rotate freely, no auto spin
+let R2,S2,C2,vm,bobG,shd,flt=0,vact=0,vd=0;const VX=new T.Vector3(1,0,0),VY=new T.Vector3(0,1,0);
+// 道具 3D 檢視器：拖曳旋轉；使用 MODEL[id]() 產生模型，#vt/#vdsc/#vc 為其 UI。
+function viewItem(id){$('vt').textContent=IT[id][0];$('vdsc').textContent=IT[id][1];$('vm').style.display='flex';onView(id);
+ if(!R2){R2=new T.WebGLRenderer({antialias:true,alpha:true});R2.setSize(280,280);R2.setPixelRatio(Math.min(devicePixelRatio,2));R2.outputEncoding=T.sRGBEncoding;R2.toneMapping=T.ACESFilmicToneMapping;S2=new T.Scene();try{S2.environment=makeEnv(R2)}catch(e){}C2=new T.PerspectiveCamera(35,1,.1,10);C2.position.z=3.2;S2.add(new T.AmbientLight(0xffffff,.45));const d=new T.DirectionalLight(0xfff2e0,1.6);d.position.set(2,3,3);S2.add(d);
+  {const sc2=cv(64,64,(g,w,h)=>{const r=g.createRadialGradient(32,32,2,32,32,30);r.addColorStop(0,'rgba(0,0,0,.55)');r.addColorStop(1,'rgba(0,0,0,0)');g.fillStyle=r;g.fillRect(0,0,w,h)});shd=new T.Mesh(new T.PlaneGeometry(1.5,.9),SM({map:sc2.t,transparent:true,depthWrite:false,roughness:1}));shd.rotation.x=-Math.PI/2;shd.position.y=-.95;shd.visible=false;S2.add(shd)}
+  const c=R2.domElement;c.style.cssText='touch-action:none;cursor:grab;display:block;margin:0 auto;max-width:100%';$('vc').appendChild(c);
+  c.onpointerdown=e=>{vd=1;c.setPointerCapture(e.pointerId)};c.onpointermove=e=>{if(vd&&vm){vm.rotateOnWorldAxis(VY,e.movementX*.012);vm.rotateOnWorldAxis(VX,e.movementY*.012)}};c.onpointerup=()=>vd=0}
+ if(bobG)S2.remove(bobG);const m=MODEL[id](),b=new T.Box3().setFromObject(m),s=b.getSize(new T.Vector3()),c=b.getCenter(new T.Vector3());m.position.sub(c);vm=new T.Group();vm.add(m);vm.scale.setScalar(1.7/Math.max(s.x,s.y,s.z));vm.rotation.set(.25,-.5,0);bobG=new T.Group();bobG.add(vm);S2.add(bobG);flt=!!m.userData.float;shd.visible=flt;m.traverse(o=>{if(o.userData.hull){const u=o.material.userData;u.u.value=u.base*vm.scale.x}});
+ if(!vact){vact=1;(function lp(){if(!vact)return;requestAnimationFrame(lp);const q=performance.now()*.002;if(flt){bobG.position.y=Math.sin(q)*.05+.04;shd.scale.setScalar(1-Math.sin(q)*.08);shd.material.opacity=.85-Math.sin(q)*.15}else{bobG.position.y=0}R2.render(S2,C2)})()}}
+$('vx').onclick=()=>{vact=0;$('vm').style.display='none';onViewClose()};
+if(sc.environment)sc.traverse(o=>{if(o.material&&!o.userData.hull)[].concat(o.material).forEach(m=>{if(m.metalness>.5)m.envMap=sc.environment})});
+// 【CONTRACT】主迴圈：所有視覺由 S 推導（相機緩動、燈光閃爍、暗門/逃生口/門板/扶手/地毯/海報/按鈕/證件動畫）。
+// 換模型後若某物件不動了，先檢查這裡是否還引用同名變數。
+// ---- main loop: every visual is derived from the state S
+// ↓ loop 內引用的物件變數：room md hatG cavL cm lpm sp amb pl dL dR key nt machM rail pg stuckBtn hole ball BT[] card flapP/peel()
+(function loop(t){requestAnimationFrame(loop);const s=S||{};
+ yaw+=(tY-yaw)*.12;pit+=(tP-pit)*.12;fov+=(tF-fov)*.12;cam.fov=fov;cam.updateProjectionMatrix();cam.rotation.set(pit,yaw,0);
+ camFx(t,s);
+ if(t>fN){fS=t;fN=t+(TITLE?1800+Math.random()*2600:9000+Math.random()*9000)}
+ let f=1+Math.sin(t*.0012)*.025;if(fS>=0&&t-fS<420)f*=(Math.floor((t-fS)/90)%2)?.3:.95;if(s.shk)f=(Math.floor(t/130)%3==1)?.25:1;
+ f=flkMod(t,f);sfxTick(s,t,f);cm.emissive.setRGB(.86,.96,.9).multiplyScalar(.3+.7*f);lpm.emissive.setRGB(.93,1,.96).multiplyScalar(.3+.7*f);sp.intensity=2.6*f;amb.intensity=.18+.06*f;pl.intensity=.14+.16*f;
+ md.rotation.y+=((s.open&&!s.mclosed?-1.6:0)-md.rotation.y)*.1;{const tg=s.hat?1:0,d=tg-hatP;hatP+=Math.sign(d)*Math.min(Math.abs(d),.017);hatG.position.set(sm((hatP-.35)/.65)*.78,2.605+sm(hatP/.35)*.13,HZ);cavL.intensity=.45*sm(hatP/.5)}flapP+=((s.lift?1:0)-flapP)*.04;if(Math.abs(flapP-flapLast)>.0004){peel(flapP);flapLast=flapP}
+ const dv=s.exit?.42:0;dL.position.x+=((-.35-dv)-dL.position.x)*doorK;dR.position.x+=((.05+dv)-dR.position.x)*doorK;
+ key.visible=!!(s.lift&&!s.dkey&&flapP>.55);nt.visible=!!(s.open&&!s.real);ntFall(t,s);machM.material.map.needsUpdate=false;
+ if(!s.rail){rail.position.set(-.79,.95,0);rail.rotation.z=0}else{rail.position.y+=(.036-rail.position.y)*.09;rail.position.x+=(-.55-rail.position.x)*.07;rail.position.z+=(-.4-rail.position.z)*.07;rail.rotation.z+=(.0-rail.rotation.z)*.1}rail.visible=!s.rail2;
+ if(!s.pdone){pg.visible=true;pg.position.set(.4,1.4,1.595);pg.rotation.z+=((s.pt||0)-pg.rotation.z)*.2}else{pg.position.y+=(-.3-pg.position.y)*.12;pg.position.z-=.003;pg.rotation.z+=.04;if(pg.position.y<.05)pg.visible=false}
+ const op=!!(s.pried&&!s.fixed),c=stuckBtn;c.position.x+=((op?.785:.75)-c.position.x)*.15;c.position.y+=((op?.92:.96)-c.position.y)*.15;c.rotation.z+=((op?.6:0)-c.rotation.z)*.15;hole.visible=op;ball.visible=!!(s.pried&&!s.paper);
+ BT.forEach(m=>{const u=m.userData;u.p*=.88;if(u.p<.01)u.p=0;if(m!==c||!op)m.position.z=-1.57-.012*u.p;else m.position.z+=(-1.51-m.position.z)*.15;u.fm.emissive.setRGB(1.1*u.p,.85*u.p,.25*u.p)});
+ if(s.drop&&!s.card&&(cardSt>0||hatP>.7)){card.visible=true;if(cardSt==0){card.position.set(0,2.66,HZ);card.rotation.set(-1.2,0,.25);cvy=0;cardSt=1}if(cardSt==1){cvy=Math.max(cvy-.0012,-.024);card.position.y+=cvy;const hy=Math.min(1,card.position.y);card.position.x=Math.sin(card.position.y*4.2)*.06*hy;card.rotation.x+=(-Math.PI/2-card.rotation.x)*.04;card.rotation.z=.3*Math.cos(card.position.y*3.4)*hy;if(card.position.y<=.02){card.position.y=.02;cardSt=2}}}else{card.visible=false;if(!s.drop)cardSt=0}
+ if(comp)comp.render();else R.render(sc,cam)})(0);
+showTitle();
+</script></body></html>
